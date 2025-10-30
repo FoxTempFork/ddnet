@@ -1821,6 +1821,7 @@ void CMenus::RenderServerbrowser(CUIRect MainView)
 		dbg_assert(false, "ui_page invalid for RenderServerbrowser");
 	}
 
+	// clang-format off
 	/*
 		+---------------------------+ +---communities---+
 		|                           | |                 |
@@ -1831,6 +1832,7 @@ void CMenus::RenderServerbrowser(CUIRect MainView)
 		+---------------------------+ |                 |
 			status box            +-----------------+
 	*/
+	// clang-format on
 
 	CUIRect ServerList, StatusBox, ToolBox, TabBar;
 	MainView.Draw(ms_ColorTabbarActive, IGraphics::CORNER_B, 10.0f);
