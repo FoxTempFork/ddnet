@@ -83,6 +83,7 @@ class CHttpRequest : public IHttpRequest
 	}
 
 	char m_aUrl[256] = {0};
+	char m_aProxy[256] = {0};
 
 	void *m_pHeaders = nullptr;
 	unsigned char *m_pBody = nullptr;
@@ -211,6 +212,7 @@ public:
 		str_format(aHeader, sizeof(aHeader), "%s: %d", pName, Value);
 		Header(aHeader);
 	}
+	void Proxy(const char *pProxy) { str_copy(m_aProxy, pProxy); }
 
 	const char *Dest()
 	{

@@ -13,6 +13,7 @@
 #include <engine/engine.h>
 #include <engine/external/json-parser/json.h>
 #include <engine/serverbrowser.h>
+#include <engine/shared/config.h>
 #include <engine/shared/http.h>
 #include <engine/shared/jobs.h>
 #include <engine/shared/linereader.h>
@@ -219,6 +220,7 @@ void CChooseMaster::CJob::Run()
 		const char *pUrl = m_pData->m_aaUrls[aRandomized[i]];
 		std::shared_ptr<CHttpRequest> pHead = HttpHead(pUrl);
 		pHead->Timeout(Timeout);
+		pHead->Proxy(g_Config.m_ClRegisterProxy);
 		pHead->LogProgress(HTTPLOG::FAILURE);
 		{
 			const CLockScope LockScope(m_Lock);
@@ -240,6 +242,7 @@ void CChooseMaster::CJob::Run()
 		auto StartTime = time_get_nanoseconds();
 		std::shared_ptr<CHttpRequest> pGet = HttpGet(pUrl);
 		pGet->Timeout(Timeout);
+		pGet->Proxy(g_Config.m_ClRegisterProxy);
 		pGet->LogProgress(HTTPLOG::FAILURE);
 		{
 			const CLockScope LockScope(m_Lock);
@@ -378,6 +381,7 @@ void CServerBrowserHttp::Update()
 		m_pGetServers = HttpGet(pBestUrl);
 		// 10 seconds connection timeout, lower than 8KB/s for 10 seconds to fail.
 		m_pGetServers->Timeout(CTimeout{10000, 0, 8000, 10});
+		m_pGetServers->Proxy(g_Config.m_ClRegisterProxy);
 		m_pHttp->Run(m_pGetServers);
 		m_State = STATE_REFRESHING;
 	}
