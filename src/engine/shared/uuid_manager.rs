@@ -210,3 +210,10 @@ impl fmt::Display for CUuid {
         uuid.fmt(f)
     }
 }
+
+impl CUuid {
+    /// Returns the raw 16 UUID bytes.
+    pub fn as_bytes(&self) -> &[u8; 16] {
+        &self.data
+    }
+}

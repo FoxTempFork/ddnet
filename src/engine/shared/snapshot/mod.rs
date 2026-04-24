@@ -1,7 +1,3 @@
-use crate::CUuidManager_Global;
-use crate::OFFSET_UUID;
-use libtw2_snapshot::format::TypeId;
-
 mod builder;
 mod delta;
 
@@ -51,23 +47,3 @@ mod ffi {
 pub const SNAPSHOT_MAX_ITEMS: usize = 1024;
 /// Maximum size of a snapshot in its serialized form.
 pub const SNAPSHOT_MAX_SIZE: usize = 65536; // 64 KiB
-
-fn type_id_from_i32(sixup: bool, mut type_: i32) -> Option<TypeId> {
-    if type_ < OFFSET_UUID {
-        if sixup {
-            if type_ >= 0 {
-                type_ = ffi::Obj_SixToSeven(type_);
-                if type_ < 0 {
-                    return None;
-                }
-            } else {
-                type_ = -type_;
-            }
-        }
-        Some(TypeId::Ordinal(
-            type_.try_into().expect("type id must be positive"),
-        ))
-    } else {
-        Some(TypeId::Uuid(CUuidManager_Global().GetUuid(type_).into()))
-    }
-}
