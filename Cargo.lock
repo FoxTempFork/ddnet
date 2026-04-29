@@ -158,6 +158,7 @@ dependencies = [
  "libtw2-gamenet-snap",
  "libtw2-packer",
  "libtw2-warn",
+ "rustc-hash",
  "uuid",
  "vec_map",
 ]
@@ -217,6 +218,12 @@ checksum = "ce25767e7b499d1b604768e7cde645d14cc8584231ea6b295e9c9eb22c02e1d1"
 dependencies = [
  "proc-macro2",
 ]
+
+[[package]]
+name = "rustc-hash"
+version = "2.1.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "94300abf3f1ae2e2b8ffb7b58043de3d399c73fa6f4b73826402a5c457614dbe"
 
 [[package]]
 name = "serde"

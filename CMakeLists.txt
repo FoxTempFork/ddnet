@@ -3027,6 +3027,7 @@ if(TOOLS)
     map_resave.cpp
     map_test.cpp
     packetgen.cpp
+    snap_bench.cpp
     stun.cpp
     twping.cpp
     unicode_confusables.cpp
