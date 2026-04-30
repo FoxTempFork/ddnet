@@ -14,3 +14,9 @@ panic = "abort"
 [profile.release]
 lto = "thin"
 panic = "abort"
+
+[patch."https://github.com/heinrich5991/libtw2"]
+libtw2-common = { path = "vendor/common" }
+libtw2-packer = { path = "vendor/packer" }
+libtw2-snapshot = { path = "vendor/snapshot" }
+libtw2-warn = { path = "vendor/warn" }

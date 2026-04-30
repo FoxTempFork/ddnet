@@ -563,6 +563,7 @@ struct CSnapshotBuilder;
 struct CSnapshotBuilder final : public ::rust::Opaque {
   void Init(bool sixup) noexcept;
   bool NewItem(::std::int32_t type_, ::std::int32_t id, ::rust::Slice<const ::std::int32_t> data) noexcept;
+  bool NewItemsFlat(::rust::Slice<const ::std::int32_t> types, ::rust::Slice<const ::std::int32_t> ids, ::rust::Slice<const ::std::int32_t> data, ::rust::Slice<const ::std::uint32_t> offsets) noexcept;
   ::std::int32_t FinishIfNoDroppedItems(::CSnapshotBuffer &buffer) noexcept;
   ::std::int32_t Finish(::CSnapshotBuffer &buffer) noexcept;
   ~CSnapshotBuilder() = delete;

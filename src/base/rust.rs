@@ -230,7 +230,7 @@ impl<'a> cmp::PartialEq<&'a str> for StrRef<'a> {
 
 impl<'a> cmp::PartialOrd for StrRef<'a> {
     fn partial_cmp(&self, other: &StrRef<'a>) -> Option<cmp::Ordering> {
-        Some(self.to_str().cmp(other.to_str()))
+        Some(self.cmp(other))
     }
 }
 

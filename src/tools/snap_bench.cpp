@@ -77,6 +77,28 @@ int main()
 	// --- current Rust variant ---
 	auto pBuilder = CSnapshotBuilder_New();
 	auto pBuffer = CSnapshotBuffer_New();
+
+	// Pre-flatten workload for batched Rust call.
+	std::vector<int32_t> vTypes;
+	std::vector<int32_t> vIds;
+	std::vector<int32_t> vFlatData;
+	std::vector<uint32_t> vOffsets;
+	vTypes.reserve(Items.size());
+	vIds.reserve(Items.size());
+	vOffsets.reserve(Items.size() + 1);
+	vOffsets.push_back(0);
+	for(const auto &It : Items)
+	{
+		vTypes.push_back(It.m_Type);
+		vIds.push_back(It.m_Id);
+		vFlatData.insert(vFlatData.end(), It.m_Data.begin(), It.m_Data.end());
+		vOffsets.push_back((uint32_t)vFlatData.size());
+	}
+	const auto TypesSlice = rust::Slice<const int32_t>(vTypes.data(), vTypes.size());
+	const auto IdsSlice = rust::Slice<const int32_t>(vIds.data(), vIds.size());
+	const auto DataSlice = rust::Slice<const int32_t>(vFlatData.data(), vFlatData.size());
+	const auto OffsetsSlice = rust::Slice<const uint32_t>(vOffsets.data(), vOffsets.size());
+
 	for(int k = 0; k < WARMUP; k++)
 	{
 		pBuilder->Init(false);
@@ -85,20 +107,116 @@ int main()
 				rust::Slice<const int32_t>(It.m_Data.data(), It.m_Data.size()));
 		pBuilder->Finish(*pBuffer);
 	}
+	for(int k = 0; k < WARMUP; k++)
+	{
+		pBuilder->Init(false);
+		pBuilder->NewItemsFlat(TypesSlice, IdsSlice, DataSlice, OffsetsSlice);
+		pBuilder->Finish(*pBuffer);
+	}
 	std::vector<double> vMicros;
+	std::vector<double> vMicrosNewItems;
+	std::vector<double> vMicrosFinish;
 	vMicros.reserve(MEASURE);
+	vMicrosNewItems.reserve(MEASURE);
+	vMicrosFinish.reserve(MEASURE);
 	for(int k = 0; k < MEASURE; k++)
 	{
 		auto T0 = std::chrono::steady_clock::now();
 		pBuilder->Init(false);
+		auto T1 = std::chrono::steady_clock::now();
 		for(const auto &It : Items)
 			pBuilder->NewItem(It.m_Type, It.m_Id,
 				rust::Slice<const int32_t>(It.m_Data.data(), It.m_Data.size()));
+		auto T2 = std::chrono::steady_clock::now();
+		int Size = pBuilder->Finish(*pBuffer);
+		auto T3 = std::chrono::steady_clock::now();
+		(void)Size;
+		vMicros.push_back(std::chrono::duration<double, std::micro>(T3 - T0).count());
+		vMicrosNewItems.push_back(std::chrono::duration<double, std::micro>(T2 - T1).count());
+		vMicrosFinish.push_back(std::chrono::duration<double, std::micro>(T3 - T2).count());
+	}
+	PrintResults("build snap (300 items, per-item)", vMicros);
+	PrintResults(" NewItem loop", vMicrosNewItems);
+	PrintResults(" Finish", vMicrosFinish);
+
+	// Batched variant.
+	std::vector<double> vMicrosBatch;
+	vMicrosBatch.reserve(MEASURE);
+	for(int k = 0; k < MEASURE; k++)
+	{
+		auto T0 = std::chrono::steady_clock::now();
+		pBuilder->Init(false);
+		pBuilder->NewItemsFlat(TypesSlice, IdsSlice, DataSlice, OffsetsSlice);
 		int Size = pBuilder->Finish(*pBuffer);
 		auto T1 = std::chrono::steady_clock::now();
 		(void)Size;
-		vMicros.push_back(std::chrono::duration<double, std::micro>(T1 - T0).count());
+		vMicrosBatch.push_back(std::chrono::duration<double, std::micro>(T1 - T0).count());
 	}
-	PrintResults("build snap (300 items)", vMicros);
+	PrintResults("build snap (300 items, batch)", vMicrosBatch);
+
+	// --- delta bench (create + unpack) ---
+	auto pDelta = CSnapshotDelta_New();
+	// Register unknown static sizes for a small type range (forces size field in deltas).
+	for(int t = 0; t < 64; t++)
+		pDelta->SetStaticsize(t, 0);
+
+	auto pFromBuf = CSnapshotBuffer_New();
+	auto pToBuf = CSnapshotBuffer_New();
+	auto pOutBuf = CSnapshotBuffer_New();
+
+	// Create a slightly modified snapshot for delta workload.
+	auto Items2 = Items;
+	for(size_t i = 0; i < Items2.size(); i++)
+	{
+		if((i % 3) == 0 && !Items2[i].m_Data.empty())
+			Items2[i].m_Data[0] ^= 0x5a5a5a5a;
+	}
+
+	pBuilder->Init(false);
+	for(const auto &It : Items)
+		pBuilder->NewItem(It.m_Type, It.m_Id, rust::Slice<const int32_t>(It.m_Data.data(), It.m_Data.size()));
+	int FromSize = pBuilder->Finish(*pFromBuf);
+
+	pBuilder->Init(false);
+	for(const auto &It : Items2)
+		pBuilder->NewItem(It.m_Type, It.m_Id, rust::Slice<const int32_t>(It.m_Data.data(), It.m_Data.size()));
+	int ToSize = pBuilder->Finish(*pToBuf);
+
+	(void)FromSize;
+	(void)ToSize;
+
+	std::vector<int32_t> vDeltaInts(CSnapshot::MAX_SIZE / sizeof(int32_t));
+	const auto DeltaOut = rust::Slice<int32_t>(vDeltaInts.data(), vDeltaInts.size());
+
+	// Create one delta to size the input slice for UnpackDelta.
+	int DeltaBytes = pDelta->CreateDelta(*pFromBuf->AsSnapshot(), *pToBuf->AsSnapshot(), DeltaOut);
+	const size_t DeltaLen = DeltaBytes > 0 ? (size_t)DeltaBytes / sizeof(int32_t) : 0;
+	const auto DeltaIn = rust::Slice<const int32_t>(vDeltaInts.data(), DeltaLen);
+
+	std::vector<double> vMicrosCreateDelta;
+	std::vector<double> vMicrosUnpackDelta;
+	vMicrosCreateDelta.reserve(MEASURE);
+	vMicrosUnpackDelta.reserve(MEASURE);
+
+	for(int k = 0; k < MEASURE; k++)
+	{
+		auto T0 = std::chrono::steady_clock::now();
+		int Size = pDelta->CreateDelta(*pFromBuf->AsSnapshot(), *pToBuf->AsSnapshot(), DeltaOut);
+		auto T1 = std::chrono::steady_clock::now();
+		(void)Size;
+		vMicrosCreateDelta.push_back(std::chrono::duration<double, std::micro>(T1 - T0).count());
+	}
+
+	for(int k = 0; k < MEASURE; k++)
+	{
+		auto T0 = std::chrono::steady_clock::now();
+		int Size = pDelta->UnpackDelta(*pFromBuf->AsSnapshot(), *pOutBuf, DeltaIn);
+		auto T1 = std::chrono::steady_clock::now();
+		(void)Size;
+		vMicrosUnpackDelta.push_back(std::chrono::duration<double, std::micro>(T1 - T0).count());
+	}
+
+	PrintResults("create delta (300 items, 1/3 changed)", vMicrosCreateDelta);
+	PrintResults("unpack delta (300 items, 1/3 changed)", vMicrosUnpackDelta);
 	return 0;
 }

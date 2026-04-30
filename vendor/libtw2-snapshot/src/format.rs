@@ -192,8 +192,27 @@ pub fn apply_item_delta(
             if in_.len() != out.len() {
                 return Err(DeltaDifferingSizes);
             }
-            for i in 0..out.len() {
-                out[i] = in_[i].wrapping_add(delta[i]);
+            // Hot path: implement as a raw-pointer loop to help LLVM optimize
+            // and reduce bounds checks. Unroll a bit to reduce loop overhead.
+            let len = out.len();
+            let in_p = in_.as_ptr();
+            let d_p = delta.as_ptr();
+            let out_p = out.as_mut_ptr();
+            let mut i = 0usize;
+            while i + 4 <= len {
+                unsafe {
+                    *out_p.add(i + 0) = (*in_p.add(i + 0)).wrapping_add(*d_p.add(i + 0));
+                    *out_p.add(i + 1) = (*in_p.add(i + 1)).wrapping_add(*d_p.add(i + 1));
+                    *out_p.add(i + 2) = (*in_p.add(i + 2)).wrapping_add(*d_p.add(i + 2));
+                    *out_p.add(i + 3) = (*in_p.add(i + 3)).wrapping_add(*d_p.add(i + 3));
+                }
+                i += 4;
+            }
+            while i < len {
+                unsafe {
+                    *out_p.add(i) = (*in_p.add(i)).wrapping_add(*d_p.add(i));
+                }
+                i += 1;
             }
         }
         None => out.copy_from_slice(delta),
@@ -236,8 +255,26 @@ pub fn create_item_delta(
             if from.len() != to.len() {
                 return Err(DeltaDifferingSizes);
             }
-            for i in 0..out.len() {
-                out[i] = to[i].wrapping_sub(from[i]);
+            // Hot path: raw-pointer loop with a bit of unrolling.
+            let len = out.len();
+            let from_p = from.as_ptr();
+            let to_p = to.as_ptr();
+            let out_p = out.as_mut_ptr();
+            let mut i = 0usize;
+            while i + 4 <= len {
+                unsafe {
+                    *out_p.add(i + 0) = (*to_p.add(i + 0)).wrapping_sub(*from_p.add(i + 0));
+                    *out_p.add(i + 1) = (*to_p.add(i + 1)).wrapping_sub(*from_p.add(i + 1));
+                    *out_p.add(i + 2) = (*to_p.add(i + 2)).wrapping_sub(*from_p.add(i + 2));
+                    *out_p.add(i + 3) = (*to_p.add(i + 3)).wrapping_sub(*from_p.add(i + 3));
+                }
+                i += 4;
+            }
+            while i < len {
+                unsafe {
+                    *out_p.add(i) = (*to_p.add(i)).wrapping_sub(*from_p.add(i));
+                }
+                i += 1;
             }
         }
         None => out.copy_from_slice(to),

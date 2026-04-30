@@ -1,5 +1,4 @@
 use crate::format::apply_item_delta;
-use crate::format::create_item_delta;
 use crate::format::item_data_to_uuid;
 use crate::format::key;
 use crate::format::key_to_id;
@@ -489,6 +488,84 @@ impl RawSnap {
         self.sort_items();
         Ok(())
     }
+
+    pub fn read_with_delta_view<W>(
+        &mut self,
+        warn: &mut W,
+        from: &RawSnapView<'_>,
+        delta: &Delta,
+    ) -> Result<(), Error>
+    where
+        W: Warn<Warning>,
+    {
+        self.clear();
+
+        let mut index = 0usize;
+        let mut updates_index = 0usize;
+        let mut num_deletions = 0usize;
+
+        while index < from.len() || updates_index < delta.updated_items.len() {
+            let from_key = if index < from.len() {
+                Some(from.key_at(index))
+            } else {
+                None
+            };
+            let update_key = delta.updated_items.get(updates_index).map(|e| e.key);
+
+            match (from_key, update_key) {
+                (Some(from_key), Some(update_key)) => match (from_key as u32)
+                    .cmp(&(update_key as u32))
+                {
+                    cmp::Ordering::Less => {
+                        if delta.deleted_items.contains_key(from_key) {
+                            num_deletions += 1;
+                        } else {
+                            self.push_copy_key(from_key, from.data_at(index))?;
+                        }
+                        index += 1;
+                    }
+                    cmp::Ordering::Greater => {
+                        let diff =
+                            &delta.buf[to_usize(delta.updated_items[updates_index].range.clone())];
+                        self.push_apply_key(update_key, None, diff)?;
+                        updates_index += 1;
+                    }
+                    cmp::Ordering::Equal => {
+                        if delta.deleted_items.contains_key(from_key) {
+                            num_deletions += 1;
+                        }
+                        let diff =
+                            &delta.buf[to_usize(delta.updated_items[updates_index].range.clone())];
+                        self.push_apply_key(from_key, Some(from.data_at(index)), diff)?;
+                        index += 1;
+                        updates_index += 1;
+                    }
+                },
+                (Some(fk), None) => {
+                    if delta.deleted_items.contains_key(fk) {
+                        num_deletions += 1;
+                    } else {
+                        self.push_copy_key(fk, from.data_at(index))?;
+                    }
+                    index += 1;
+                }
+                (None, Some(uk)) => {
+                    let diff =
+                        &delta.buf[to_usize(delta.updated_items[updates_index].range.clone())];
+                    self.push_apply_key(uk, None, diff)?;
+                    updates_index += 1;
+                }
+                (None, None) => break,
+            }
+        }
+
+        if num_deletions != delta.deleted_items.len() {
+            warn.warn(Warning::UnknownDelete);
+        }
+        self.sort_items();
+        Ok(())
+    }
+
     fn write_impl<F: FnMut(i32) -> Result<(), CapacityError>>(
         &self,
         buf: &mut Vec<i32>,
@@ -590,6 +667,100 @@ impl RawSnap {
     pub fn recycle(mut self) -> RawBuilder {
         self.clear();
         RawBuilder { snap: self }
+    }
+}
+
+/// A borrowed view of a serialized snapshot (`&[i32]`) without copying item data.
+///
+/// This is useful when the snapshot already exists in memory in the on-wire
+/// layout and we want to diff/inspect it without allocating.
+pub struct RawSnapView<'a> {
+    offsets: &'a [i32],
+    item_data: &'a [i32],
+}
+
+impl<'a> RawSnapView<'a> {
+    pub fn read_from_ints<W: Warn<Warning>>(
+        warn: &mut W,
+        ints: &'a [i32],
+    ) -> Result<RawSnapView<'a>, Error> {
+        let mut unpacker = IntUnpacker::new(ints);
+        let header = SnapHeader::decode_obj(&mut unpacker)?;
+        let ints = unpacker.as_slice();
+
+        let offsets_len = header.num_items.assert_usize();
+        if ints.len() < offsets_len {
+            return Err(Error::OffsetsUnpacking);
+        }
+        if header.data_size % 4 != 0 {
+            return Err(Error::InvalidOffset);
+        }
+        let items_len = (header.data_size / 4).assert_usize();
+        match (offsets_len + items_len).cmp(&ints.len()) {
+            cmp::Ordering::Less => warn.warn(Warning::ExcessSnapData),
+            cmp::Ordering::Equal => {}
+            cmp::Ordering::Greater => return Err(Error::ItemsUnpacking),
+        }
+
+        let (offsets, item_data) = ints.split_at(offsets_len);
+        let item_data = &item_data[..items_len];
+
+        // Validate offsets exactly like `RawSnap::read_from_ints`.
+        let mut prev_offset = None;
+        for &offset in offsets {
+            if offset < 0 || (offset % 4) != 0 {
+                return Err(Error::InvalidOffset);
+            }
+            let offset = (offset.assert_usize()) / 4;
+            if let Some(prev) = prev_offset {
+                if offset <= prev || offset > items_len {
+                    return Err(Error::InvalidOffset);
+                }
+                // Also validates that each item has room for at least the key.
+                if prev + 1 > offset {
+                    return Err(Error::InvalidOffset);
+                }
+            } else {
+                if offset > items_len {
+                    return Err(Error::InvalidOffset);
+                }
+            }
+            prev_offset = Some(offset);
+        }
+        if let Some(prev) = prev_offset {
+            if prev >= items_len {
+                return Err(Error::InvalidOffset);
+            }
+        } else {
+            // No items. `data_size` must be 0, otherwise there would be stray data.
+            if items_len != 0 {
+                return Err(Error::InvalidOffset);
+            }
+        }
+
+        Ok(RawSnapView { offsets, item_data })
+    }
+
+    #[inline]
+    pub fn len(&self) -> usize {
+        self.offsets.len()
+    }
+
+    #[inline]
+    pub fn key_at(&self, index: usize) -> i32 {
+        let start = (self.offsets[index].assert_usize()) / 4;
+        self.item_data[start]
+    }
+
+    #[inline]
+    pub fn data_at(&self, index: usize) -> &'a [i32] {
+        let start = (self.offsets[index].assert_usize()) / 4;
+        let end = if index + 1 < self.offsets.len() {
+            (self.offsets[index + 1].assert_usize()) / 4
+        } else {
+            self.item_data.len()
+        };
+        &self.item_data[start + 1..end]
     }
 }
 
@@ -913,19 +1084,6 @@ impl Delta {
         self.updated_items.clear();
         self.buf.clear();
     }
-    fn prepare_update_item(&mut self, key: i32, size: usize, order: u32) -> ops::Range<u32> {
-        let offset = self.buf.len();
-        let start = offset.assert_u32();
-        let end = (offset + size).assert_u32();
-        self.buf.resize(offset + size, 0);
-        let range = start..end;
-        self.updated_items.push(UpdateEntry {
-            key,
-            range: range.clone(),
-            order,
-        });
-        range
-    }
     pub fn create(&mut self, from: &Snap, to: &Snap) {
         self.create_raw(&from.raw, &to.raw)
     }
@@ -948,21 +1106,55 @@ impl Delta {
                         index += 1;
                     } else if (fk as u32) > (tk as u32) {
                         let data = to.item_from_entry(&to_items[j]);
-                        let range = self.prepare_update_item(tk, data.len(), 0);
-                        let out_delta = &mut self.buf[to_usize(range.clone())];
-                        create_item_delta(None, data, out_delta)
-                            .expect("item sizes can't be mismatched for self-created snapshots");
+                        let start = self.buf.len();
+                        self.buf.reserve(data.len());
+                        let out = &mut self.buf.spare_capacity_mut()[..data.len()];
+                        for (dst, &v) in out.iter_mut().zip(data) {
+                            dst.write(v);
+                        }
+                        let start_u32 = start.assert_u32();
+                        let end_u32 = (start + data.len()).assert_u32();
+                        unsafe {
+                            self.buf.set_len(start + data.len());
+                        }
+                        self.updated_items.push(UpdateEntry {
+                            key: tk,
+                            range: start_u32..end_u32,
+                            order: 0,
+                        });
                         j += 1;
                     } else {
                         let from_data = from.item_from_entry(&from_items[index]);
                         let to_data = to.item_from_entry(&to_items[j]);
-                        if from_data != to_data {
-                            let range = self.prepare_update_item(tk, to_data.len(), 0);
-                            let out_delta = &mut self.buf[to_usize(range.clone())];
-                            create_item_delta(Some(from_data), to_data, out_delta).expect(
-                                "item sizes can't be mismatched for self-created snapshots",
-                            );
-                            // but they can be different for snapshots received over the network…
+                        assert_eq!(
+                            from_data.len(),
+                            to_data.len(),
+                            "item sizes can't be mismatched for self-created snapshots"
+                        );
+                        // Create delta and detect changes in a single pass to avoid
+                        // `from_data != to_data` (memcmp) followed by a second pass
+                        // for delta creation.
+                        let offset = self.buf.len();
+                        let len = to_data.len();
+                        self.buf.reserve(len);
+                        let out_delta = &mut self.buf.spare_capacity_mut()[..len];
+                        let mut any_nonzero = false;
+                        for i in 0..len {
+                            let d = to_data[i].wrapping_sub(from_data[i]);
+                            out_delta[i].write(d);
+                            any_nonzero |= d != 0;
+                        }
+                        if any_nonzero {
+                            let start = offset.assert_u32();
+                            let end = (offset + len).assert_u32();
+                            unsafe {
+                                self.buf.set_len(offset + len);
+                            }
+                            self.updated_items.push(UpdateEntry {
+                                key: tk,
+                                range: start..end,
+                                order: 0,
+                            });
                         }
                         index += 1;
                         j += 1;
@@ -974,10 +1166,123 @@ impl Delta {
                 }
                 (None, Some(tk)) => {
                     let data = to.item_from_entry(&to_items[j]);
-                    let range = self.prepare_update_item(tk, data.len(), 0);
-                    let out_delta = &mut self.buf[to_usize(range.clone())];
-                    create_item_delta(None, data, out_delta)
-                        .expect("item sizes can't be mismatched for self-created snapshots");
+                    let start = self.buf.len();
+                    self.buf.reserve(data.len());
+                    let out = &mut self.buf.spare_capacity_mut()[..data.len()];
+                    for (dst, &v) in out.iter_mut().zip(data) {
+                        dst.write(v);
+                    }
+                    let start_u32 = start.assert_u32();
+                    let end_u32 = (start + data.len()).assert_u32();
+                    unsafe {
+                        self.buf.set_len(start + data.len());
+                    }
+                    self.updated_items.push(UpdateEntry {
+                        key: tk,
+                        range: start_u32..end_u32,
+                        order: 0,
+                    });
+                    j += 1;
+                }
+                (None, None) => break,
+            }
+        }
+    }
+
+    /// Like [`Delta::create_raw`], but operates on borrowed snapshot views without copying.
+    pub fn create_view<'a>(&mut self, from: &RawSnapView<'a>, to: &RawSnapView<'a>) {
+        self.clear();
+        let mut index = 0usize;
+        let mut j = 0usize;
+
+        while index < from.len() || j < to.len() {
+            let from_key = if index < from.len() {
+                Some(from.key_at(index))
+            } else {
+                None
+            };
+            let to_key = if j < to.len() { Some(to.key_at(j)) } else { None };
+
+            match (from_key, to_key) {
+                (Some(fk), Some(tk)) => {
+                    if (fk as u32) < (tk as u32) {
+                        assert!(self.deleted_items.insert_key(fk));
+                        index += 1;
+                    } else if (fk as u32) > (tk as u32) {
+                        let data = to.data_at(j);
+                        let start = self.buf.len();
+                        self.buf.reserve(data.len());
+                        let out = &mut self.buf.spare_capacity_mut()[..data.len()];
+                        for (dst, &v) in out.iter_mut().zip(data) {
+                            dst.write(v);
+                        }
+                        let start_u32 = start.assert_u32();
+                        let end_u32 = (start + data.len()).assert_u32();
+                        unsafe {
+                            self.buf.set_len(start + data.len());
+                        }
+                        self.updated_items.push(UpdateEntry {
+                            key: tk,
+                            range: start_u32..end_u32,
+                            order: 0,
+                        });
+                        j += 1;
+                    } else {
+                        let from_data = from.data_at(index);
+                        let to_data = to.data_at(j);
+                        assert_eq!(
+                            from_data.len(),
+                            to_data.len(),
+                            "item sizes can't be mismatched for self-created snapshots"
+                        );
+                        let offset = self.buf.len();
+                        let len = to_data.len();
+                        self.buf.reserve(len);
+                        let out_delta = &mut self.buf.spare_capacity_mut()[..len];
+                        let mut any_nonzero = false;
+                        for i in 0..len {
+                            let d = to_data[i].wrapping_sub(from_data[i]);
+                            out_delta[i].write(d);
+                            any_nonzero |= d != 0;
+                        }
+                        if any_nonzero {
+                            let start = offset.assert_u32();
+                            let end = (offset + len).assert_u32();
+                            unsafe {
+                                self.buf.set_len(offset + len);
+                            }
+                            self.updated_items.push(UpdateEntry {
+                                key: tk,
+                                range: start..end,
+                                order: 0,
+                            });
+                        }
+                        index += 1;
+                        j += 1;
+                    }
+                }
+                (Some(fk), None) => {
+                    assert!(self.deleted_items.insert_key(fk));
+                    index += 1;
+                }
+                (None, Some(tk)) => {
+                    let data = to.data_at(j);
+                    let start = self.buf.len();
+                    self.buf.reserve(data.len());
+                    let out = &mut self.buf.spare_capacity_mut()[..data.len()];
+                    for (dst, &v) in out.iter_mut().zip(data) {
+                        dst.write(v);
+                    }
+                    let start_u32 = start.assert_u32();
+                    let end_u32 = (start + data.len()).assert_u32();
+                    unsafe {
+                        self.buf.set_len(start + data.len());
+                    }
+                    self.updated_items.push(UpdateEntry {
+                        key: tk,
+                        range: start_u32..end_u32,
+                        order: 0,
+                    });
                     j += 1;
                 }
                 (None, None) => break,
@@ -1083,6 +1388,185 @@ impl Delta {
         }
 
         Ok(&result[..idx])
+    }
+
+    /// Applies this delta to a base snapshot view and writes the resulting snapshot
+    /// directly into `result` (serialized `i32` layout), without allocating a `RawSnap`.
+    pub fn apply_to_view_to_ints<'a, W: Warn<Warning>>(
+        &self,
+        warn: &mut W,
+        from: &RawSnapView<'_>,
+        result: &'a mut [i32],
+    ) -> Result<&'a [i32], Error> {
+        // Pass 1: compute output sizes and validate update lengths for existing items.
+        let mut index = 0usize;
+        let mut updates_index = 0usize;
+        let mut num_deletions = 0usize;
+        let mut num_items_out = 0usize;
+        let mut payload_i32s_out = 0usize;
+
+        while index < from.len() || updates_index < self.updated_items.len() {
+            let from_key = if index < from.len() {
+                Some(from.key_at(index))
+            } else {
+                None
+            };
+            let update_key = self.updated_items.get(updates_index).map(|e| e.key);
+
+            match (from_key, update_key) {
+                (Some(fk), Some(uk)) => match (fk as u32).cmp(&(uk as u32)) {
+                    cmp::Ordering::Less => {
+                        if self.deleted_items.contains_key(fk) {
+                            num_deletions += 1;
+                        } else {
+                            num_items_out += 1;
+                            payload_i32s_out += from.data_at(index).len();
+                        }
+                        index += 1;
+                    }
+                    cmp::Ordering::Greater => {
+                        let diff = &self.buf[to_usize(self.updated_items[updates_index].range.clone())];
+                        num_items_out += 1;
+                        payload_i32s_out += diff.len();
+                        updates_index += 1;
+                    }
+                    cmp::Ordering::Equal => {
+                        if self.deleted_items.contains_key(fk) {
+                            num_deletions += 1;
+                        }
+                        let base = from.data_at(index);
+                        let diff = &self.buf[to_usize(self.updated_items[updates_index].range.clone())];
+                        if base.len() != diff.len() {
+                            return Err(Error::DeltaDifferingSizes);
+                        }
+                        num_items_out += 1;
+                        payload_i32s_out += diff.len();
+                        index += 1;
+                        updates_index += 1;
+                    }
+                },
+                (Some(fk), None) => {
+                    if self.deleted_items.contains_key(fk) {
+                        num_deletions += 1;
+                    } else {
+                        num_items_out += 1;
+                        payload_i32s_out += from.data_at(index).len();
+                    }
+                    index += 1;
+                }
+                (None, Some(_uk)) => {
+                    let diff = &self.buf[to_usize(self.updated_items[updates_index].range.clone())];
+                    num_items_out += 1;
+                    payload_i32s_out += diff.len();
+                    updates_index += 1;
+                }
+                (None, None) => break,
+            }
+        }
+
+        if num_deletions != self.deleted_items.len() {
+            warn.warn(Warning::UnknownDelete);
+        }
+
+        let total_len = 2 + (num_items_out * 2) + payload_i32s_out;
+        if result.len() < total_len {
+            return Err(Error::TooLongSnap);
+        }
+
+        // Header.
+        result[0] = ((payload_i32s_out + num_items_out) * mem::size_of::<i32>()).assert_i32();
+        result[1] = num_items_out.assert_i32();
+
+        // Pass 2: write offsets + item data.
+        let mut offsets_idx = 2usize;
+        let mut data_idx = 2usize + num_items_out;
+        let mut offset_bytes: i32 = 0;
+
+        index = 0;
+        updates_index = 0;
+
+        while index < from.len() || updates_index < self.updated_items.len() {
+            let from_key = if index < from.len() {
+                Some(from.key_at(index))
+            } else {
+                None
+            };
+            let update_key = self.updated_items.get(updates_index).map(|e| e.key);
+
+            match (from_key, update_key) {
+                (Some(fk), Some(uk)) => match (fk as u32).cmp(&(uk as u32)) {
+                    cmp::Ordering::Less => {
+                        if !self.deleted_items.contains_key(fk) {
+                            let base = from.data_at(index);
+                            result[offsets_idx] = offset_bytes;
+                            offsets_idx += 1;
+                            result[data_idx] = fk;
+                            data_idx += 1;
+                            let end = data_idx + base.len();
+                            result[data_idx..end].copy_from_slice(base);
+                            data_idx = end;
+                            offset_bytes += ((base.len() + 1) * mem::size_of::<i32>()).assert_i32();
+                        }
+                        index += 1;
+                    }
+                    cmp::Ordering::Greater => {
+                        let diff = &self.buf[to_usize(self.updated_items[updates_index].range.clone())];
+                        result[offsets_idx] = offset_bytes;
+                        offsets_idx += 1;
+                        result[data_idx] = uk;
+                        data_idx += 1;
+                        let end = data_idx + diff.len();
+                        result[data_idx..end].copy_from_slice(diff);
+                        data_idx = end;
+                        offset_bytes += ((diff.len() + 1) * mem::size_of::<i32>()).assert_i32();
+                        updates_index += 1;
+                    }
+                    cmp::Ordering::Equal => {
+                        let base = from.data_at(index);
+                        let diff = &self.buf[to_usize(self.updated_items[updates_index].range.clone())];
+                        result[offsets_idx] = offset_bytes;
+                        offsets_idx += 1;
+                        result[data_idx] = fk;
+                        data_idx += 1;
+                        let end = data_idx + diff.len();
+                        apply_item_delta(Some(base), diff, &mut result[data_idx..end])?;
+                        data_idx = end;
+                        offset_bytes += ((diff.len() + 1) * mem::size_of::<i32>()).assert_i32();
+                        index += 1;
+                        updates_index += 1;
+                    }
+                },
+                (Some(fk), None) => {
+                    if !self.deleted_items.contains_key(fk) {
+                        let base = from.data_at(index);
+                        result[offsets_idx] = offset_bytes;
+                        offsets_idx += 1;
+                        result[data_idx] = fk;
+                        data_idx += 1;
+                        let end = data_idx + base.len();
+                        result[data_idx..end].copy_from_slice(base);
+                        data_idx = end;
+                        offset_bytes += ((base.len() + 1) * mem::size_of::<i32>()).assert_i32();
+                    }
+                    index += 1;
+                }
+                (None, Some(uk)) => {
+                    let diff = &self.buf[to_usize(self.updated_items[updates_index].range.clone())];
+                    result[offsets_idx] = offset_bytes;
+                    offsets_idx += 1;
+                    result[data_idx] = uk;
+                    data_idx += 1;
+                    let end = data_idx + diff.len();
+                    result[data_idx..end].copy_from_slice(diff);
+                    data_idx = end;
+                    offset_bytes += ((diff.len() + 1) * mem::size_of::<i32>()).assert_i32();
+                    updates_index += 1;
+                }
+                (None, None) => break,
+            }
+        }
+
+        Ok(&result[..data_idx])
     }
 
     fn read_impl<W, O, R>(&mut self, warn: &mut W, object_size: O, p: &mut R) -> Result<(), Error>
@@ -1214,6 +1698,160 @@ impl RawBuilder {
         let mut snap = self.snap;
         snap.sort_items();
         snap
+    }
+}
+
+#[derive(Clone, Copy)]
+struct BorrowedEntry {
+    key: i32,
+    data: *const i32,
+    len: u32,
+}
+
+/// A snapshot builder that borrows item data instead of copying it.
+///
+/// This exists for high-performance FFI usage where the caller can guarantee
+/// that all passed pointers stay valid until the snapshot is finished.
+///
+/// # Safety
+///
+/// All `add_item_borrowed` calls must pass:
+/// - `data` pointing to `len` consecutive `i32`s,
+/// - aligned for `i32`,
+/// - remaining readable until after `write_to_ints_borrowed` / `drain_into_builder` completes,
+/// - not aliasing the output buffer passed to `write_to_ints_borrowed`.
+///
+/// The snapshot logic and serialized layout match [`RawSnap::write_to_ints`].
+#[derive(Default)]
+pub struct BorrowedRawBuilder {
+    items: Vec<BorrowedEntry>,
+    seen: SeenKeys,
+    payload_i32s: usize,
+}
+
+impl BorrowedRawBuilder {
+    pub fn new() -> BorrowedRawBuilder {
+        Default::default()
+    }
+
+    #[inline]
+    pub fn clear(&mut self) {
+        self.items.clear();
+        self.seen.clear();
+        self.payload_i32s = 0;
+    }
+
+    #[inline]
+    fn would_fit_after_push(&self, add_payload_i32s: usize) -> bool {
+        const MAX_INTS: usize = MAX_SNAPSHOT_SIZE / mem::size_of::<i32>();
+        let num_items = self.items.len() + 1;
+        let payload = self.payload_i32s + add_payload_i32s;
+        2 + (2 * num_items) + payload <= MAX_INTS
+    }
+
+    /// Adds an item by borrowing its data.
+    ///
+    /// The size checks and duplicate key behavior match [`RawBuilder::add_item`].
+    ///
+    /// # Safety
+    ///
+    /// See [`BorrowedRawBuilder`] type-level safety contract.
+    pub unsafe fn add_item_borrowed(
+        &mut self,
+        raw_type_id: u16,
+        id: u16,
+        data: *const i32,
+        len: usize,
+    ) -> Result<(), BuilderError> {
+        let num_items = self.items.len();
+        if num_items + 1 > MAX_SNAPSHOT_ITEMS {
+            return Err(BuilderError::TooManyItems);
+        }
+        if !self.would_fit_after_push(len) {
+            return Err(BuilderError::TooLongSnap);
+        }
+
+        let k = key(raw_type_id, id);
+        if !self.seen.insert(k) {
+            return Err(BuilderError::DuplicateKey);
+        }
+        self.items.push(BorrowedEntry {
+            key: k,
+            data,
+            len: len.assert_u32(),
+        });
+        self.payload_i32s += len;
+        Ok(())
+    }
+
+    /// Drains all currently borrowed items into an owned [`Builder`].
+    ///
+    /// This copies the borrowed data into the owned builder, and then clears
+    /// `self` so it can be reused.
+    ///
+    /// # Safety
+    ///
+    /// See [`BorrowedRawBuilder`] type-level safety contract.
+    pub unsafe fn drain_into_builder(&mut self, builder: &mut Builder) -> Result<(), BuilderError> {
+        for entry in &self.items {
+            let raw_type_id = key_to_raw_type_id(entry.key);
+            let id = key_to_id(entry.key);
+            let len = entry.len.usize();
+            let data = std::slice::from_raw_parts(entry.data, len);
+            builder.add_item(TypeId::Ordinal(raw_type_id), id, data)?;
+        }
+        self.clear();
+        Ok(())
+    }
+
+    /// Writes the snapshot into an `i32` output buffer.
+    ///
+    /// Returns the written prefix of `result` on success.
+    ///
+    /// # Safety
+    ///
+    /// See [`BorrowedRawBuilder`] type-level safety contract.
+    pub unsafe fn write_to_ints_borrowed<'a>(
+        &mut self,
+        result: &'a mut [i32],
+    ) -> Result<&'a [i32], CapacityError> {
+        if self.items.len() >= 2 {
+            self.items.sort_unstable_by_key(|e| e.key as u32);
+        }
+
+        let num_items = self.items.len();
+        let total_len = 2 + (num_items * 2) + self.payload_i32s;
+        if result.len() < total_len {
+            return Err(CapacityError);
+        }
+
+        let mut idx = 0usize;
+        let data_size = ((self.payload_i32s + num_items) * mem::size_of::<i32>()).assert_i32();
+        result[idx] = data_size;
+        idx += 1;
+        result[idx] = num_items.assert_i32();
+        idx += 1;
+
+        let mut offset: i32 = 0;
+        for entry in &self.items {
+            result[idx] = offset;
+            idx += 1;
+            let data_len = entry.len.usize();
+            offset += ((data_len + 1) * mem::size_of::<i32>()).assert_i32();
+        }
+
+        for entry in &self.items {
+            result[idx] = entry.key;
+            idx += 1;
+            let len = entry.len.usize();
+            if len != 0 {
+                let dst = result[idx..idx + len].as_mut_ptr();
+                std::ptr::copy_nonoverlapping(entry.data, dst, len);
+            }
+            idx += len;
+        }
+
+        Ok(&result[..idx])
     }
 }
 

@@ -3,9 +3,7 @@ use crate::CSnapshotBuffer;
 use libtw2_packer::IntUnpacker;
 use libtw2_snapshot::format as snap_format;
 use libtw2_snapshot::snap;
-use libtw2_snapshot::snap::RawSnap;
 use libtw2_warn as warn;
-use std::mem;
 use std::pin::Pin;
 
 #[allow(unused_must_use)] // in generated code for CSnapshotDelta_New
@@ -65,10 +63,7 @@ pub struct CSnapshotDelta {
 
 #[derive(Clone, Default)]
 struct Buffer {
-    snap_from: RawSnap,
-    snap_to: RawSnap,
     delta: snap::Delta,
-    write: Vec<i32>,
 }
 
 /// Diffs two snapshot items of the same size using the Teeworlds snapshot
@@ -192,23 +187,17 @@ impl CSnapshotDelta {
     /// Returns the number of bytes written to the `delta` slice, or `-1` if
     /// delta creation failed.
     pub fn CreateDelta(&mut self, from: &CSnapshot, to: &CSnapshot, delta: &mut [i32]) -> i32 {
-        self.buf
-            .snap_from
-            .read_from_ints(&mut warn::Panic, from.AsSlice())
+        let from_view = snap::RawSnapView::read_from_ints(&mut warn::Panic, from.AsSlice())
             .expect("incoming snap must be valid");
-        self.buf
-            .snap_to
-            .read_from_ints(&mut warn::Panic, to.AsSlice())
+        let to_view = snap::RawSnapView::read_from_ints(&mut warn::Panic, to.AsSlice())
             .expect("incoming snap must be valid");
-        self.buf
-            .delta
-            .create_raw(&self.buf.snap_from, &self.buf.snap_to);
+        self.buf.delta.create_view(&from_view, &to_view);
         match self
             .buf
             .delta
             .write_to_ints(|type_| obj_size(&self.static_sizes, type_), delta)
         {
-            Ok(written) => (written.len() * mem::size_of::<i32>()).try_into().unwrap(),
+            Ok(written) => std::mem::size_of_val(written).try_into().unwrap(),
             Err(_) => -1,
         }
     }
@@ -235,24 +224,14 @@ impl CSnapshotDelta {
         {
             return -1;
         }
-        self.buf
-            .snap_from
-            .read_from_ints(&mut warn::Panic, from.AsSlice())
+        let from_view = snap::RawSnapView::read_from_ints(&mut warn::Panic, from.AsSlice())
             .expect("incoming snap must be valid");
-        if self
-            .buf
-            .snap_to
-            .read_with_delta(&mut warn::Ignore, &self.buf.snap_from, &self.buf.delta)
-            .is_err()
-        {
-            return -1;
-        }
         match self
             .buf
-            .snap_to
-            .write_to_ints(&mut self.buf.write, to.AsMutSlice())
+            .delta
+            .apply_to_view_to_ints(&mut warn::Ignore, &from_view, to.AsMutSlice())
         {
-            Ok(written) => (written.len() * mem::size_of::<i32>()).try_into().unwrap(),
+            Ok(written) => std::mem::size_of_val(written).try_into().unwrap(),
             Err(_) => -1,
         }
     }

@@ -33,13 +33,7 @@ fn main() {
             let kind = match extension {
                 Some("framework") => "framework=",
                 Some("so") => "dylib=",
-                Some("a") => {
-                    if supports_whole_archive {
-                        "static:-whole-archive="
-                    } else {
-                        ""
-                    }
-                }
+                Some("a") if supports_whole_archive => "static:-whole-archive=",
                 _ => "",
             };
             let dir_kind = match extension {
