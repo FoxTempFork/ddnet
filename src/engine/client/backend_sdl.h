@@ -226,6 +226,7 @@ class CGraphicsBackend_SDL_GL : public CGraphicsBackend_Threaded
 	EBackendType m_BackendType = BACKEND_TYPE_AUTO;
 
 	char m_aErrorString[256];
+	bool m_WindowGrabbed = false;
 
 	static EBackendType DetectBackend();
 	static void ClampDriverVersion(EBackendType BackendType);
@@ -256,6 +257,7 @@ public:
 	int WindowActive() override;
 	int WindowOpen() override;
 	void SetWindowGrab(bool Grab) override;
+	bool WindowGrabbed() const override { return m_WindowGrabbed; }
 	bool ResizeWindow(int w, int h, int RefreshRate) override;
 	void GetViewportSize(int &w, int &h) override;
 	void NotifyWindow() override;

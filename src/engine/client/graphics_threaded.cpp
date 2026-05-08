@@ -2686,6 +2686,11 @@ void CGraphics_Threaded::GotResized(int w, int h, int RefreshRate)
 		for(auto &ResizeListener : m_vResizeListeners)
 			ResizeListener();
 	}
+
+	if(m_pBackend->WindowGrabbed())
+	{
+		m_pBackend->SetWindowGrab(true);
+	}
 }
 
 bool CGraphics_Threaded::IsScreenKeyboardShown()
