@@ -132,6 +132,7 @@ class CCommandProcessorFragment_Vulkan : public CCommandProcessorFragment_GLBase
 		std::vector<SDeviceDescriptorPool> m_vPools;
 		VkDeviceSize m_DefaultAllocSize = 0;
 		bool m_IsUniformPool = false;
+		size_t m_LastScanIndex = 0;
 	};
 
 	// some mix of queue and binary tree
@@ -898,9 +899,6 @@ class CCommandProcessorFragment_Vulkan : public CCommandProcessorFragment_GLBase
 
 	VkBuffer m_IndexBuffer;
 	SDeviceMemoryBlock m_IndexBufferMemory;
-
-	VkBuffer m_RenderIndexBuffer;
-	SDeviceMemoryBlock m_RenderIndexBufferMemory;
 	size_t m_CurRenderIndexPrimitiveCount;
 
 	VkDeviceSize m_NonCoherentMemAlignment;
@@ -1025,6 +1023,8 @@ private:
 	VkRenderPass m_VKRenderPass;
 
 	VkSurfaceFormatKHR m_VKSurfFormat;
+
+	VkPipelineCache m_VKPipelineCache = VK_NULL_HANDLE;
 
 	SDeviceDescriptorPools m_StandardTextureDescrPool;
 	SDeviceDescriptorPools m_TextTextureDescrPool;
@@ -1776,7 +1776,7 @@ protected:
 		MemAllocInfo.memoryTypeIndex = FindMemoryType(m_VKGPU, RequiredMemoryTypeBits, BufferProperties);
 
 		BufferMemory.m_Size = RequiredSize;
-		m_pTextureMemoryUsage->store(m_pTextureMemoryUsage->load(std::memory_order_relaxed) + RequiredSize, std::memory_order_relaxed);
+		m_pTextureMemoryUsage->fetch_add(RequiredSize, std::memory_order_relaxed);
 
 		if(IsVerbose())
 		{
@@ -1945,13 +1945,13 @@ protected:
 		{
 			vkFreeMemory(m_VKDevice, BufferMem.m_Mem, nullptr);
 			if(BufferMem.m_UsageType == MEMORY_BLOCK_USAGE_BUFFER)
-				m_pBufferMemoryUsage->store(m_pBufferMemoryUsage->load(std::memory_order_relaxed) - BufferMem.m_Size, std::memory_order_relaxed);
+				m_pBufferMemoryUsage->fetch_sub(BufferMem.m_Size, std::memory_order_relaxed);
 			else if(BufferMem.m_UsageType == MEMORY_BLOCK_USAGE_TEXTURE)
-				m_pTextureMemoryUsage->store(m_pTextureMemoryUsage->load(std::memory_order_relaxed) - BufferMem.m_Size, std::memory_order_relaxed);
+				m_pTextureMemoryUsage->fetch_sub(BufferMem.m_Size, std::memory_order_relaxed);
 			else if(BufferMem.m_UsageType == MEMORY_BLOCK_USAGE_STREAM)
-				m_pStreamMemoryUsage->store(m_pStreamMemoryUsage->load(std::memory_order_relaxed) - BufferMem.m_Size, std::memory_order_relaxed);
+				m_pStreamMemoryUsage->fetch_sub(BufferMem.m_Size, std::memory_order_relaxed);
 			else if(BufferMem.m_UsageType == MEMORY_BLOCK_USAGE_STAGING)
-				m_pStagingMemoryUsage->store(m_pStagingMemoryUsage->load(std::memory_order_relaxed) - BufferMem.m_Size, std::memory_order_relaxed);
+				m_pStagingMemoryUsage->fetch_sub(BufferMem.m_Size, std::memory_order_relaxed);
 
 			if(IsVerbose())
 			{
@@ -2049,7 +2049,7 @@ protected:
 		FreedMemory += m_StagingBufferCacheImage.Shrink(m_VKDevice);
 		if(FreedMemory > 0)
 		{
-			m_pStagingMemoryUsage->store(m_pStagingMemoryUsage->load(std::memory_order_relaxed) - FreedMemory, std::memory_order_relaxed);
+			m_pStagingMemoryUsage->fetch_sub(FreedMemory, std::memory_order_relaxed);
 			if(IsVerbose())
 			{
 				log_debug("gfx/vulkan", "Deallocated chunks of memory with size %" PRIzu " from all frames (staging buffer).", FreedMemory);
@@ -2059,7 +2059,7 @@ protected:
 		FreedMemory += m_VertexBufferCache.Shrink(m_VKDevice);
 		if(FreedMemory > 0)
 		{
-			m_pBufferMemoryUsage->store(m_pBufferMemoryUsage->load(std::memory_order_relaxed) - FreedMemory, std::memory_order_relaxed);
+			m_pBufferMemoryUsage->fetch_sub(FreedMemory, std::memory_order_relaxed);
 			if(IsVerbose())
 			{
 				log_debug("gfx/vulkan", "Deallocated chunks of memory with size %" PRIzu " from all frames (buffer).", FreedMemory);
@@ -2070,7 +2070,7 @@ protected:
 			FreedMemory += ImageBufferCache.second.Shrink(m_VKDevice);
 		if(FreedMemory > 0)
 		{
-			m_pTextureMemoryUsage->store(m_pTextureMemoryUsage->load(std::memory_order_relaxed) - FreedMemory, std::memory_order_relaxed);
+			m_pTextureMemoryUsage->fetch_sub(FreedMemory, std::memory_order_relaxed);
 			if(IsVerbose())
 			{
 				log_debug("gfx/vulkan", "Deallocated chunks of memory with size %" PRIzu " from all frames (texture).", FreedMemory);
@@ -2181,8 +2181,9 @@ protected:
 
 			SubmitInfo.commandBufferCount = 1;
 			SubmitInfo.pCommandBuffers = &MemoryCommandBuffer;
-			vkQueueSubmit(m_VKGraphicsQueue, 1, &SubmitInfo, VK_NULL_HANDLE);
-			vkQueueWaitIdle(m_VKGraphicsQueue);
+			vkResetFences(m_VKDevice, 1, &m_vQueueSubmitFences[m_CurImageIndex]);
+			vkQueueSubmit(m_VKGraphicsQueue, 1, &SubmitInfo, m_vQueueSubmitFences[m_CurImageIndex]);
+			vkWaitForFences(m_VKDevice, 1, &m_vQueueSubmitFences[m_CurImageIndex], VK_TRUE, std::numeric_limits<uint64_t>::max());
 
 			m_vUsedMemoryCommandBuffer[m_CurImageIndex] = false;
 		}
@@ -2902,15 +2903,11 @@ protected:
 		{
 			Barrier.srcAccessMask = 0;
 			Barrier.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-
-			SourceStage = VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
-			DestinationStage = VK_PIPELINE_STAGE_TRANSFER_BIT;
 		}
 		else if(OldLayout == VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL && NewLayout == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL)
 		{
 			Barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
 			Barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
-
 			SourceStage = VK_PIPELINE_STAGE_TRANSFER_BIT;
 			DestinationStage = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
 		}
@@ -2918,7 +2915,6 @@ protected:
 		{
 			Barrier.srcAccessMask = VK_ACCESS_SHADER_READ_BIT;
 			Barrier.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-
 			SourceStage = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
 			DestinationStage = VK_PIPELINE_STAGE_TRANSFER_BIT;
 		}
@@ -2926,7 +2922,6 @@ protected:
 		{
 			Barrier.srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
 			Barrier.dstAccessMask = VK_ACCESS_MEMORY_READ_BIT;
-
 			SourceStage = VK_PIPELINE_STAGE_TRANSFER_BIT;
 			DestinationStage = VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT;
 		}
@@ -2934,7 +2929,6 @@ protected:
 		{
 			Barrier.srcAccessMask = VK_ACCESS_MEMORY_READ_BIT;
 			Barrier.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
-
 			SourceStage = VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT;
 			DestinationStage = VK_PIPELINE_STAGE_TRANSFER_BIT;
 		}
@@ -2942,15 +2936,11 @@ protected:
 		{
 			Barrier.srcAccessMask = 0;
 			Barrier.dstAccessMask = VK_ACCESS_MEMORY_READ_BIT;
-
-			SourceStage = VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
-			DestinationStage = VK_PIPELINE_STAGE_TRANSFER_BIT;
 		}
 		else if(OldLayout == VK_IMAGE_LAYOUT_GENERAL && NewLayout == VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL)
 		{
 			Barrier.srcAccessMask = VK_ACCESS_MEMORY_READ_BIT;
 			Barrier.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-
 			SourceStage = VK_PIPELINE_STAGE_TRANSFER_BIT;
 			DestinationStage = VK_PIPELINE_STAGE_TRANSFER_BIT;
 		}
@@ -2958,7 +2948,6 @@ protected:
 		{
 			Barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
 			Barrier.dstAccessMask = VK_ACCESS_MEMORY_READ_BIT;
-
 			SourceStage = VK_PIPELINE_STAGE_TRANSFER_BIT;
 			DestinationStage = VK_PIPELINE_STAGE_TRANSFER_BIT;
 		}
@@ -3320,7 +3309,7 @@ protected:
 			ExecBuffer.m_aDescriptors[0] = m_vTextures[State.m_Texture].m_VKStandard3DTexturedDescrSet;
 		}
 
-		ExecBuffer.m_IndexBuffer = m_RenderIndexBuffer;
+		ExecBuffer.m_IndexBuffer = m_IndexBuffer;
 
 		ExecBuffer.m_EstimatedRenderCallCount = DrawCalls;
 
@@ -4747,7 +4736,7 @@ public:
 			PipelineInfo.pDynamicState = &DynamicStateCreate;
 		}
 
-		if(vkCreateGraphicsPipelines(m_VKDevice, VK_NULL_HANDLE, 1, &PipelineInfo, nullptr, &Pipeline) != VK_SUCCESS)
+		if(vkCreateGraphicsPipelines(m_VKDevice, m_VKPipelineCache, 1, &PipelineInfo, nullptr, &Pipeline) != VK_SUCCESS)
 		{
 			SetError(EGfxErrorType::GFX_ERROR_TYPE_INIT, "Creating the graphic pipeline failed.");
 			return false;
@@ -5504,6 +5493,11 @@ public:
 
 		if(IsLastCleanup)
 		{
+			if(m_VKPipelineCache != VK_NULL_HANDLE)
+			{
+				vkDestroyPipelineCache(m_VKDevice, m_VKPipelineCache, nullptr);
+				m_VKPipelineCache = VK_NULL_HANDLE;
+			}
 			DestroyUniformDescriptorSetLayouts();
 			DestroyTextDescriptorSetLayout();
 			DestroyDescriptorSetLayouts();
@@ -5657,11 +5651,11 @@ public:
 		VKBufferMemory.m_Size = MemRequirements.size;
 
 		if(MemUsage == MEMORY_BLOCK_USAGE_BUFFER)
-			m_pBufferMemoryUsage->store(m_pBufferMemoryUsage->load(std::memory_order_relaxed) + MemRequirements.size, std::memory_order_relaxed);
+			m_pBufferMemoryUsage->fetch_add(MemRequirements.size, std::memory_order_relaxed);
 		else if(MemUsage == MEMORY_BLOCK_USAGE_STAGING)
-			m_pStagingMemoryUsage->store(m_pStagingMemoryUsage->load(std::memory_order_relaxed) + MemRequirements.size, std::memory_order_relaxed);
+			m_pStagingMemoryUsage->fetch_add(MemRequirements.size, std::memory_order_relaxed);
 		else if(MemUsage == MEMORY_BLOCK_USAGE_STREAM)
-			m_pStreamMemoryUsage->store(m_pStreamMemoryUsage->load(std::memory_order_relaxed) + MemRequirements.size, std::memory_order_relaxed);
+			m_pStreamMemoryUsage->fetch_add(MemRequirements.size, std::memory_order_relaxed);
 
 		if(IsVerbose())
 		{
@@ -5767,8 +5761,11 @@ public:
 
 			bool Found = false;
 			size_t DescriptorPoolIndex = std::numeric_limits<size_t>::max();
-			for(size_t i = 0; i < DescriptorPools.m_vPools.size(); ++i)
+			size_t PoolCount = DescriptorPools.m_vPools.size();
+			size_t StartIndex = minimum(DescriptorPools.m_LastScanIndex, PoolCount > 0 ? PoolCount - 1 : 0);
+			for(size_t scan = 0; scan < PoolCount; ++scan)
 			{
+				size_t i = (StartIndex + scan) % PoolCount;
 				auto &Pool = DescriptorPools.m_vPools[i];
 				if(Pool.m_CurSize + CurAllocNum < Pool.m_Size)
 				{
@@ -5778,6 +5775,7 @@ public:
 					if(RetDescr == VK_NULL_HANDLE)
 						RetDescr = Pool.m_Pool;
 					DescriptorPoolIndex = i;
+					DescriptorPools.m_LastScanIndex = i;
 					break;
 				}
 				else
@@ -5791,6 +5789,7 @@ public:
 						if(RetDescr == VK_NULL_HANDLE)
 							RetDescr = Pool.m_Pool;
 						DescriptorPoolIndex = i;
+						DescriptorPools.m_LastScanIndex = i;
 						break;
 					}
 				}
@@ -5809,6 +5808,7 @@ public:
 				Pool.m_CurSize += AllocatedInThisRun;
 				if(RetDescr == VK_NULL_HANDLE)
 					RetDescr = Pool.m_Pool;
+				DescriptorPools.m_LastScanIndex = DescriptorPoolIndex;
 			}
 
 			for(size_t i = CurAllocOffset; i < CurAllocOffset + AllocatedInThisRun; ++i)
@@ -6037,6 +6037,13 @@ public:
 
 		if(!CreateFramebuffers())
 			return -1;
+
+		if(m_VKPipelineCache == VK_NULL_HANDLE)
+		{
+			VkPipelineCacheCreateInfo PipelineCacheInfo{};
+			PipelineCacheInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO;
+			vkCreatePipelineCache(m_VKDevice, &PipelineCacheInfo, nullptr, &m_VKPipelineCache);
+		}
 
 		if(!CreateStandardGraphicsPipeline("shader/vulkan/prim.vert.spv", "shader/vulkan/prim.frag.spv", false, false))
 			return -1;
@@ -6604,11 +6611,6 @@ public:
 			*pCommand->m_pInitError = -2;
 			return false;
 		}
-		if(!CreateIndexBuffer(aIndices.data(), sizeof(uint32_t) * aIndices.size(), m_RenderIndexBuffer, m_RenderIndexBufferMemory))
-		{
-			*pCommand->m_pInitError = -2;
-			return false;
-		}
 		m_CurRenderIndexPrimitiveCount = CCommandBuffer::MAX_VERTICES / 4;
 
 		m_CanAssert = true;
@@ -6621,7 +6623,6 @@ public:
 		vkDeviceWaitIdle(m_VKDevice);
 
 		DestroyIndexBuffer(m_IndexBuffer, m_IndexBufferMemory);
-		DestroyIndexBuffer(m_RenderIndexBuffer, m_RenderIndexBufferMemory);
 
 		CleanupVulkan<true>(m_SwapChainImageCount);
 
@@ -7030,7 +7031,7 @@ public:
 		size_t IndicesCount = pCommand->m_RequiredIndicesNum;
 		if(m_CurRenderIndexPrimitiveCount < IndicesCount / 6)
 		{
-			m_vvFrameDelayedBufferCleanup[m_CurImageIndex].push_back({m_RenderIndexBuffer, m_RenderIndexBufferMemory});
+			m_vvFrameDelayedBufferCleanup[m_CurImageIndex].push_back({m_IndexBuffer, m_IndexBufferMemory});
 			std::vector<uint32_t> vIndices(IndicesCount);
 			uint32_t Primq = 0;
 			for(size_t i = 0; i < IndicesCount; i += 6)
@@ -7043,7 +7044,7 @@ public:
 				vIndices[i + 5] = Primq + 3;
 				Primq += 4;
 			}
-			if(!CreateIndexBuffer(vIndices.data(), vIndices.size() * sizeof(uint32_t), m_RenderIndexBuffer, m_RenderIndexBufferMemory))
+			if(!CreateIndexBuffer(vIndices.data(), vIndices.size() * sizeof(uint32_t), m_IndexBuffer, m_IndexBufferMemory))
 				return false;
 			m_CurRenderIndexPrimitiveCount = IndicesCount / 6;
 		}
@@ -7092,7 +7093,7 @@ public:
 			ExecBuffer.m_aDescriptors[0] = m_vTextures[pCommand->m_State.m_Texture].m_aVKStandardTexturedDescrSets[AddressModeIndex];
 		}
 
-		ExecBuffer.m_IndexBuffer = m_RenderIndexBuffer;
+		ExecBuffer.m_IndexBuffer = m_IndexBuffer;
 
 		ExecBuffer.m_EstimatedRenderCallCount = ((pCommand->m_QuadNum - 1) / GRAPHICS_MAX_QUADS_RENDER_COUNT) + 1;
 
@@ -7191,7 +7192,7 @@ public:
 
 		ExecBuffer.m_aDescriptors[0] = m_vTextures[pCommand->m_TextTextureIndex].m_VKTextDescrSet;
 
-		ExecBuffer.m_IndexBuffer = m_RenderIndexBuffer;
+		ExecBuffer.m_IndexBuffer = m_IndexBuffer;
 
 		ExecBuffer.m_EstimatedRenderCallCount = 1;
 
@@ -7259,7 +7260,7 @@ public:
 			ExecBuffer.m_aDescriptors[0] = m_vTextures[State.m_Texture].m_aVKStandardTexturedDescrSets[AddressModeIndex];
 		}
 
-		ExecBuffer.m_IndexBuffer = m_RenderIndexBuffer;
+		ExecBuffer.m_IndexBuffer = m_IndexBuffer;
 
 		ExecBuffer.m_EstimatedRenderCallCount = DrawCalls;
 
