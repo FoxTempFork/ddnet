@@ -630,52 +630,16 @@ int CEditorMap::MoveEnvelope(int IndexFrom, int IndexTo)
 	return IndexTo;
 }
 
-template<typename F>
-std::vector<std::shared_ptr<IEditorEnvelopeReference>> CEditorMap::VisitEnvelopeReferences(F &&Visitor)
+std::vector<std::shared_ptr<IEditorEnvelopeReference>> CEditorMap::VisitEnvelopeReferences(const std::function<bool(int &)> &Visitor)
 {
 	std::vector<std::shared_ptr<IEditorEnvelopeReference>> vpUpdatedReferences;
 	for(auto &pGroup : m_vpGroups)
 	{
 		for(auto &pLayer : pGroup->m_vpLayers)
 		{
-			if(pLayer->m_Type == LAYERTYPE_QUADS)
-			{
-				std::shared_ptr<CLayerQuads> pLayerQuads = std::static_pointer_cast<CLayerQuads>(pLayer);
-				std::shared_ptr<CLayerQuadsEnvelopeReference> pQuadLayerReference = std::make_shared<CLayerQuadsEnvelopeReference>(pLayerQuads);
-				for(int QuadId = 0; QuadId < (int)pLayerQuads->m_vQuads.size(); ++QuadId)
-				{
-					auto &Quad = pLayerQuads->m_vQuads[QuadId];
-					if(Visitor(Quad.m_PosEnv))
-						pQuadLayerReference->AddQuadIndex(QuadId);
-					if(Visitor(Quad.m_ColorEnv))
-						pQuadLayerReference->AddQuadIndex(QuadId);
-				}
-				if(!pQuadLayerReference->Empty())
-					vpUpdatedReferences.push_back(pQuadLayerReference);
-			}
-			else if(pLayer->m_Type == LAYERTYPE_TILES)
-			{
-				std::shared_ptr<CLayerTiles> pLayerTiles = std::static_pointer_cast<CLayerTiles>(pLayer);
-				std::shared_ptr<CLayerTilesEnvelopeReference> pTileLayerReference = std::make_shared<CLayerTilesEnvelopeReference>(pLayerTiles);
-				if(Visitor(pLayerTiles->m_ColorEnv))
-					vpUpdatedReferences.push_back(pTileLayerReference);
-			}
-			else if(pLayer->m_Type == LAYERTYPE_SOUNDS)
-			{
-				std::shared_ptr<CLayerSounds> pLayerSounds = std::static_pointer_cast<CLayerSounds>(pLayer);
-				std::shared_ptr<CLayerSoundEnvelopeReference> pSoundLayerReference = std::make_shared<CLayerSoundEnvelopeReference>(pLayerSounds);
-
-				for(int SourceId = 0; SourceId < (int)pLayerSounds->m_vSources.size(); ++SourceId)
-				{
-					auto &Source = pLayerSounds->m_vSources[SourceId];
-					if(Visitor(Source.m_PosEnv))
-						pSoundLayerReference->AddSoundSourceIndex(SourceId);
-					if(Visitor(Source.m_SoundEnv))
-						pSoundLayerReference->AddSoundSourceIndex(SourceId);
-				}
-				if(!pSoundLayerReference->Empty())
-					vpUpdatedReferences.push_back(pSoundLayerReference);
-			}
+			auto pReference = pLayer->VisitEnvelopeReferences(pLayer, Visitor);
+			if(pReference)
+				vpUpdatedReferences.push_back(pReference);
 		}
 	}
 	return vpUpdatedReferences;

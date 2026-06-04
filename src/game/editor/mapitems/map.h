@@ -226,8 +226,7 @@ public:
 	void UpdateEnvelopeReferences(int Index, std::shared_ptr<CEnvelope> &pEnvelope, std::vector<std::shared_ptr<IEditorEnvelopeReference>> &vpEditorObjectReferences);
 	std::vector<std::shared_ptr<IEditorEnvelopeReference>> DeleteEnvelope(int Index);
 	int MoveEnvelope(int IndexFrom, int IndexTo);
-	template<typename F>
-	std::vector<std::shared_ptr<IEditorEnvelopeReference>> VisitEnvelopeReferences(F &&Visitor);
+	std::vector<std::shared_ptr<IEditorEnvelopeReference>> VisitEnvelopeReferences(const std::function<bool(int &)> &Visitor);
 	bool IsEnvelopeUsed(int EnvelopeIndex) const;
 	void RemoveUnusedEnvelopes();
 

@@ -10,6 +10,7 @@
 
 #include <game/editor/editor.h>
 #include <game/editor/editor_actions.h>
+#include <game/editor/references.h>
 #include <game/editor/enums.h>
 
 #include <iterator>
@@ -1360,6 +1361,14 @@ void CLayerTiles::FlagModified(int x, int y, int w, int h)
 bool CLayerTiles::IsEnvelopeUsed(int EnvelopeIndex) const
 {
 	return m_ColorEnv == EnvelopeIndex;
+}
+
+std::shared_ptr<IEditorEnvelopeReference> CLayerTiles::VisitEnvelopeReferences(const std::shared_ptr<CLayer> &pSelf, const std::function<bool(int &)> &Visitor)
+{
+	std::shared_ptr<CLayerTilesEnvelopeReference> pTileLayerReference = std::make_shared<CLayerTilesEnvelopeReference>(std::static_pointer_cast<CLayerTiles>(pSelf));
+	if(Visitor(m_ColorEnv))
+		return pTileLayerReference;
+	return nullptr;
 }
 
 bool CLayerTiles::IsImageUsed(int ImageIndex) const

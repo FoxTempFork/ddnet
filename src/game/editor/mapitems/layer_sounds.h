@@ -22,6 +22,8 @@ public:
 	bool IsEnvelopeUsed(int EnvelopeIndex) const override;
 	bool IsSoundUsed(int SoundIndex) const override;
 
+	std::shared_ptr<IEditorEnvelopeReference> VisitEnvelopeReferences(const std::shared_ptr<CLayer> &pSelf, const std::function<bool(int &)> &Visitor) override;
+
 	void ModifyEnvelopeIndex(const FIndexModifyFunction &IndexModifyFunction) override;
 	void ModifySoundIndex(const FIndexModifyFunction &IndexModifyFunction) override;
 

@@ -26,6 +26,8 @@ public:
 	bool IsEnvelopeUsed(int EnvelopeIndex) const override;
 	bool IsImageUsed(int ImageIndex) const override;
 
+	std::shared_ptr<IEditorEnvelopeReference> VisitEnvelopeReferences(const std::shared_ptr<CLayer> &pSelf, const std::function<bool(int &)> &Visitor) override;
+
 	void ModifyImageIndex(const FIndexModifyFunction &IndexModifyFunction) override;
 	void ModifyEnvelopeIndex(const FIndexModifyFunction &IndexModifyFunction) override;
 

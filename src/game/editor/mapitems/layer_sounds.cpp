@@ -4,6 +4,7 @@
 
 #include <game/editor/editor.h>
 #include <game/editor/editor_actions.h>
+#include <game/editor/references.h>
 
 static const float s_SourceVisualSize = 32.0f;
 
@@ -191,6 +192,22 @@ bool CLayerSounds::IsEnvelopeUsed(int EnvelopeIndex) const
 	return std::any_of(m_vSources.begin(), m_vSources.end(), [&](const auto &Source) {
 		return Source.m_PosEnv == EnvelopeIndex || Source.m_SoundEnv == EnvelopeIndex;
 	});
+}
+
+std::shared_ptr<IEditorEnvelopeReference> CLayerSounds::VisitEnvelopeReferences(const std::shared_ptr<CLayer> &pSelf, const std::function<bool(int &)> &Visitor)
+{
+	std::shared_ptr<CLayerSoundEnvelopeReference> pSoundLayerReference = std::make_shared<CLayerSoundEnvelopeReference>(std::static_pointer_cast<CLayerSounds>(pSelf));
+	for(int SourceId = 0; SourceId < (int)m_vSources.size(); ++SourceId)
+	{
+		auto &Source = m_vSources[SourceId];
+		if(Visitor(Source.m_PosEnv))
+			pSoundLayerReference->AddSoundSourceIndex(SourceId);
+		if(Visitor(Source.m_SoundEnv))
+			pSoundLayerReference->AddSoundSourceIndex(SourceId);
+	}
+	if(!pSoundLayerReference->Empty())
+		return pSoundLayerReference;
+	return nullptr;
 }
 
 bool CLayerSounds::IsSoundUsed(int SoundIndex) const

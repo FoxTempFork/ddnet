@@ -6,6 +6,7 @@
 
 #include <game/editor/editor.h>
 #include <game/editor/editor_actions.h>
+#include <game/editor/references.h>
 
 CLayerQuads::CLayerQuads(CEditorMap *pMap) :
 	CLayer(pMap, LAYERTYPE_QUADS)
@@ -231,6 +232,22 @@ bool CLayerQuads::IsEnvelopeUsed(int EnvelopeIndex) const
 	return std::any_of(m_vQuads.begin(), m_vQuads.end(), [&](const auto &Quad) {
 		return Quad.m_PosEnv == EnvelopeIndex || Quad.m_ColorEnv == EnvelopeIndex;
 	});
+}
+
+std::shared_ptr<IEditorEnvelopeReference> CLayerQuads::VisitEnvelopeReferences(const std::shared_ptr<CLayer> &pSelf, const std::function<bool(int &)> &Visitor)
+{
+	std::shared_ptr<CLayerQuadsEnvelopeReference> pQuadLayerReference = std::make_shared<CLayerQuadsEnvelopeReference>(std::static_pointer_cast<CLayerQuads>(pSelf));
+	for(int QuadId = 0; QuadId < (int)m_vQuads.size(); ++QuadId)
+	{
+		auto &Quad = m_vQuads[QuadId];
+		if(Visitor(Quad.m_PosEnv))
+			pQuadLayerReference->AddQuadIndex(QuadId);
+		if(Visitor(Quad.m_ColorEnv))
+			pQuadLayerReference->AddQuadIndex(QuadId);
+	}
+	if(!pQuadLayerReference->Empty())
+		return pQuadLayerReference;
+	return nullptr;
 }
 
 bool CLayerQuads::IsImageUsed(int ImageIndex) const

@@ -6,11 +6,13 @@
 #include <game/editor/map_object.h>
 #include <game/mapitems.h>
 
+#include <functional>
 #include <memory>
 
 using FIndexModifyFunction = std::function<void(int *pIndex)>;
 
 class CLayerGroup;
+class IEditorEnvelopeReference;
 
 class CLayer : public CMapObject
 {
@@ -35,6 +37,8 @@ public:
 	virtual bool IsEnvelopeUsed(int EnvelopeIndex) const { return false; }
 	virtual bool IsImageUsed(int ImageIndex) const { return false; }
 	virtual bool IsSoundUsed(int SoundIndex) const { return false; }
+
+	virtual std::shared_ptr<IEditorEnvelopeReference> VisitEnvelopeReferences(const std::shared_ptr<CLayer> &pSelf, const std::function<bool(int &)> &Visitor) { return nullptr; }
 
 	virtual void ModifyImageIndex(const FIndexModifyFunction &IndexModifyFunction) {}
 	virtual void ModifyEnvelopeIndex(const FIndexModifyFunction &IndexModifyFunction) {}
