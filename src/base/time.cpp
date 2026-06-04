@@ -7,6 +7,12 @@
 #include "detect.h"
 #include "str.h"
 
+#if defined(CONF_FAMILY_WINDOWS)
+#include "windows.h"
+#include <cwchar>
+#include <vector>
+#endif
+
 #include <cmath>
 #include <iomanip> // std::get_time
 #include <sstream> // std::istringstream
@@ -173,6 +179,20 @@ void str_timestamp_format(char *buffer, int buffer_size, const char *format)
 void str_timestamp_ex(time_t time_data, char *buffer, int buffer_size, const char *format)
 {
 	const tm time_info = time_localtime_threadlocal(&time_data);
+#if defined(CONF_FAMILY_WINDOWS)
+	std::wstring wide_format = windows_utf8_to_wide(format);
+	std::vector<wchar_t> wide_buffer(buffer_size);
+	size_t result = wcsftime(wide_buffer.data(), wide_buffer.size(), wide_format.c_str(), &time_info);
+	if(result > 0)
+	{
+		std::optional<std::string> utf8_str = windows_wide_to_utf8(wide_buffer.data());
+		if(utf8_str.has_value())
+		{
+			str_copy(buffer, utf8_str.value().c_str(), buffer_size);
+			return;
+		}
+	}
+#endif
 	strftime(buffer, buffer_size, format, &time_info);
 	buffer[buffer_size - 1] = 0; /* assure null termination */
 }

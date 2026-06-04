@@ -144,6 +144,8 @@ void str_timestamp(char *buffer, int buffer_size);
  *               See `TimestampFormat` for common formats.
  *
  * @remark Guarantees that buffer string will contain null-termination.
+ * @remark The output is dependent on the selected locale.
+ * @remark The output is guaranteed to be UTF-8 on Windows. On other platforms, the encoding depends on the active locale.
  */
 [[gnu::format(strftime, 3, 0)]] void str_timestamp_format(char *buffer, int buffer_size, const char *format);
 
@@ -159,6 +161,8 @@ void str_timestamp(char *buffer, int buffer_size);
  *               See `TimestampFormat` for common formats.
  *
  * @remark Guarantees that buffer string will contain null-termination.
+ * @remark The output is dependent on the selected locale.
+ * @remark The output is guaranteed to be UTF-8 on Windows. On other platforms, the encoding depends on the active locale.
  */
 [[gnu::format(strftime, 4, 0)]] void str_timestamp_ex(time_t time, char *buffer, int buffer_size, const char *format);
 
