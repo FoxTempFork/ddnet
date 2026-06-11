@@ -1466,6 +1466,7 @@ public:
 
 		TextContainerIndex.Reset();
 		TextContainerIndex.m_Index = GetFreeTextContainerIndex();
+		TextContainerIndex.m_UseCount = std::make_shared<STextContainerUsages>();
 
 		float ScreenX0, ScreenY0, ScreenX1, ScreenY1;
 		Graphics()->GetScreen(&ScreenX0, &ScreenY0, &ScreenX1, &ScreenY1);

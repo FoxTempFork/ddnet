@@ -441,7 +441,7 @@ bool CServerBrowserHttp::Validate(json_value *pJson)
 }
 bool CServerBrowserHttp::Parse(json_value *pJson, std::vector<CServerInfo> *pvServers)
 {
-	std::vector<CServerInfo> vServers;
+	pvServers->clear();
 
 	const json_value &Json = *pJson;
 	const json_value &Servers = Json["servers"];
@@ -449,6 +449,9 @@ bool CServerBrowserHttp::Parse(json_value *pJson, std::vector<CServerInfo> *pvSe
 	{
 		return true;
 	}
+
+	pvServers->reserve(Servers.u.array.length);
+
 	for(unsigned int i = 0; i < Servers.u.array.length; i++)
 	{
 		const json_value &Server = Servers[i];
@@ -518,10 +521,9 @@ bool CServerBrowserHttp::Parse(json_value *pJson, std::vector<CServerInfo> *pvSe
 		}
 		if(SetInfo.m_NumAddresses > 0)
 		{
-			vServers.push_back(SetInfo);
+			pvServers->push_back(SetInfo);
 		}
 	}
-	*pvServers = vServers;
 	return false;
 }
 

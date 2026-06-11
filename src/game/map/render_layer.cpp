@@ -307,9 +307,8 @@ void CRenderLayerTile::RenderTileLayer(const ColorRGBA &Color, const CRenderLaye
 
 	if(IsVisibleInClipRegion(m_LayerClip))
 	{
-		// create the indice buffers we want to draw -- reuse them
-		std::vector<char *> vpIndexOffsets;
-		std::vector<unsigned int> vDrawCounts;
+		m_vpIndexOffsets.clear();
+		m_vDrawCounts.clear();
 
 		int X0 = std::max(ScreenRectX0, 0);
 		int X1 = std::min(ScreenRectX1, (int)Visuals.m_Width);
@@ -320,8 +319,8 @@ void CRenderLayerTile::RenderTileLayer(const ColorRGBA &Color, const CRenderLaye
 			int Y1 = std::min(ScreenRectY1, (int)Visuals.m_Height);
 
 			unsigned long long Reserve = absolute(Y1 - Y0) + 1;
-			vpIndexOffsets.reserve(Reserve);
-			vDrawCounts.reserve(Reserve);
+			m_vpIndexOffsets.reserve(Reserve);
+			m_vDrawCounts.reserve(Reserve);
 
 			for(int y = Y0; y < Y1; ++y)
 			{
@@ -330,15 +329,14 @@ void CRenderLayerTile::RenderTileLayer(const ColorRGBA &Color, const CRenderLaye
 
 				if(NumVertices)
 				{
-					vpIndexOffsets.push_back((offset_ptr_size)Visuals.m_vTilesOfLayer[y * Visuals.m_Width + X0].IndexBufferByteOffset());
-					vDrawCounts.push_back(NumVertices);
+					m_vpIndexOffsets.push_back((offset_ptr_size)Visuals.m_vTilesOfLayer[y * Visuals.m_Width + X0].IndexBufferByteOffset());
+					m_vDrawCounts.push_back(NumVertices);
 				}
 			}
 
-			int DrawCount = vpIndexOffsets.size();
-			if(DrawCount != 0)
+			if(!m_vpIndexOffsets.empty())
 			{
-				Graphics()->RenderTileLayer(Visuals.m_BufferContainerIndex, Color, vpIndexOffsets.data(), vDrawCounts.data(), DrawCount);
+				Graphics()->RenderTileLayer(Visuals.m_BufferContainerIndex, Color, m_vpIndexOffsets.data(), m_vDrawCounts.data(), m_vpIndexOffsets.size());
 			}
 		}
 	}

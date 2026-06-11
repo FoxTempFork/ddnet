@@ -869,8 +869,19 @@ class CGraphics_Threaded : public IEngineGraphics
 	}
 
 	template<typename TName>
-	void AddCmd(
-		TName &Cmd, const std::function<bool()> &FailFunc = [] { return true; })
+	void AddCmd(TName &Cmd)
+	{
+		if(m_pCommandBuffer->AddCommandUnsafe(Cmd))
+			return;
+
+		// kick command buffer and try again
+		KickCommandBuffer();
+
+		dbg_assert(m_pCommandBuffer->AddCommandUnsafe(Cmd), "graphics: failed to add command '%s' to command buffer", typeid(TName).name());
+	}
+
+	template<typename TName, typename TFailFunc>
+	void AddCmd(TName &Cmd, TFailFunc &&FailFunc)
 	{
 		if(m_pCommandBuffer->AddCommandUnsafe(Cmd))
 			return;

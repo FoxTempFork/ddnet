@@ -222,6 +222,9 @@ protected:
 	std::optional<CRenderLayerTile::CTileLayerVisuals> m_VisualTiles;
 	CMapItemLayerTilemap *m_pLayerTilemap;
 	ColorRGBA m_Color;
+
+	std::vector<char *> m_vpIndexOffsets;
+	std::vector<unsigned int> m_vDrawCounts;
 };
 
 class CRenderLayerQuads : public CRenderLayer
