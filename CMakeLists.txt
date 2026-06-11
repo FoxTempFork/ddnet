@@ -2835,6 +2835,9 @@ if(CLIENT)
     )
   endif()
   add_dependencies(game-client generate_content_types)
+  if(TARGET vulkan_shaders)
+    add_dependencies(game-client vulkan_shaders)
+  endif()
   set_property(TARGET game-client
       PROPERTY OUTPUT_NAME ${CLIENT_EXECUTABLE}
   )
