@@ -201,6 +201,7 @@ public:
 
 private:
 	// TODO: Check for Re-plug on RELOAD
+	// TODO: Robyt3: It's also unnecessary complexity to support dynamic components, for which there is currently no need.
 	std::vector<class CServerComponent *> m_vpComponents;
 	std::vector<class CServerComponent *> m_vpPlugQueue;
 	void HandleComponentsPlugQueue();
