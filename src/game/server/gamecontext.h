@@ -25,6 +25,7 @@
 #include <optional>
 #include <string>
 
+// TODO: Update this block
 /*
 	Tick
 		Game Context (CGameContext::tick)
@@ -59,6 +60,11 @@ class IGameController;
 class IMap;
 class IEngine;
 class IStorage;
+
+#define COMPONENT(Member, Type, Getter, ...) class Type;
+#include <game/server/components.h>
+#undef COMPONENT
+
 struct CAntibotRoundData;
 struct CScoreRandomMapResult;
 struct CScorePlayerResult;
@@ -127,9 +133,6 @@ class CGameContext : public IGameServer
 	CTuningParams m_aTuningList[TuneZone::NUM];
 	std::vector<std::string> m_vCensorlist;
 
-	bool m_TeeHistorianActive;
-	CTeeHistorian m_TeeHistorian;
-	ASYNCIO *m_pTeeHistorianFile;
 	CUuid m_GameUuid;
 	CMapBugs m_MapBugs;
 	CPrng m_Prng;
@@ -137,8 +140,6 @@ class CGameContext : public IGameServer
 	bool m_Resetting;
 
 	static std::optional<std::vector<int>> ClientsForVictim(int ClientId, const char *pVictim, void *pUser);
-	static void CommandCallback(int ClientId, int FlagMask, const char *pCmd, IConsole::IResult *pResult, void *pUser);
-	static void TeeHistorianWrite(const void *pData, int DataSize, void *pUser);
 
 	static void ConTuneParam(IConsole::IResult *pResult, void *pUserData);
 	static void ConToggleTuneParam(IConsole::IResult *pResult, void *pUserData);
@@ -181,6 +182,9 @@ class CGameContext : public IGameServer
 	void AddVote(const char *pDescription, const char *pCommand);
 	static int MapScan(const char *pName, int IsDir, int DirType, void *pUserData);
 
+public:
+	// TODO: REMOVE COMMENT IN FINISH COMMIT IT'S ONLY FOR MAINTAINERS INFO
+	// For components
 	class CPersistentData
 	{
 	public:
@@ -195,6 +199,17 @@ class CGameContext : public IGameServer
 		int m_LastWhisperTo;
 	};
 
+private:
+	// TODO: Check for Re-plug on RELOAD
+	std::vector<class CServerComponent *> m_vpComponents;
+	std::vector<class CServerComponent *> m_vpPlugQueue;
+	void HandleComponentsPlugQueue();
+	void UnplugDisabledComponents();
+
+#define COMPONENT(Member, Type, Getter, ...) Type *Member;
+#include <game/server/components.h>
+#undef COMPONENT
+
 public:
 	IServer *Server() const { return m_pServer; }
 	IConfigManager *ConfigManager() const { return m_pConfigManager; }
@@ -208,8 +223,6 @@ public:
 	CTuningParams *GlobalTuning() { return &m_aTuningList[0]; }
 	CTuningParams *TuningList() { return m_aTuningList; }
 	IAntibot *Antibot() { return m_pAntibot; }
-	CTeeHistorian *TeeHistorian() { return &m_TeeHistorian; }
-	bool TeeHistorianActive() const { return m_TeeHistorianActive; }
 	CNetObjHandler *GetNetObjHandler() override { return &m_NetObjHandler; }
 	protocol7::CNetObjHandler *GetNetObjHandler7() override { return &m_NetObjHandler7; }
 
@@ -403,6 +416,8 @@ public:
 	int PersistentClientDataSize() const override { return sizeof(CPersistentClientData); }
 
 	CUuid GameUuid() const override;
+	const CPrng *Prng() const { return &m_Prng; }
+	IGameController *Controller() const { return m_pController; }
 	const char *GameType() const override;
 	char m_aVersionString[32];
 	const char *Version() const override;
@@ -675,6 +690,13 @@ public:
 	void SendStartMessages(int ClientId);
 
 	void ResetTuning();
+
+#define COMPONENT(Member, Type, Getter, ...) \
+	Type *Getter() const { return Member; }
+#include <game/server/components.h>
+#undef COMPONENT
+
+	void AddToPlugQueue(CServerComponent *pComponent);
 };
 
 static inline bool CheckClientId(int ClientId)

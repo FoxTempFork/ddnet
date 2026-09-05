@@ -7,11 +7,11 @@
 #include "gamemodes/mod.h"
 #include "player.h"
 #include "score.h"
+#include "server_component.h"
 #include "teeinfo.h"
 
 #include <antibot/antibot_data.h>
 
-#include <base/aio.h>
 #include <base/dbg.h>
 #include <base/fs.h>
 #include <base/io.h>
@@ -42,8 +42,10 @@
 #include <game/collision.h>
 #include <game/gamecore.h>
 #include <game/mapitems.h>
+#include <game/server/components/teehistorian.h>
 #include <game/version.h>
 
+#include <debug/unordered_set>
 #include <vector>
 
 // Not thread-safe!
@@ -144,7 +146,23 @@ CGameContext::CGameContext(bool Resetting) :
 	}
 
 	m_aDeleteTempfile[0] = 0;
-	m_TeeHistorianActive = false;
+
+	// TODO: ADD handle error include
+#define COMPONENT(Member, Type, Getter, ...) Member = new Type(__VA_ARGS__);
+#include <game/server/components.h>
+
+#undef COMPONENT
+
+	// Components
+#define COMPONENT(Member, Type, Getter, ...) m_vpComponents.push_back(Member);
+#include <game/server/components.h>
+
+#undef COMPONENT
+
+	for(auto &pComponent : m_vpComponents)
+	{
+		pComponent->SetGameServer(this);
+	}
 }
 
 CGameContext::~CGameContext()
@@ -168,6 +186,28 @@ CGameContext::~CGameContext()
 
 	delete m_pScore;
 	m_pScore = nullptr;
+
+	// TODO: It's BAD. REFACTOR PLS
+	std::unordered_set<CServerComponent *> UniqueComponents;
+	UniqueComponents.reserve(m_vpComponents.size() + m_vpPlugQueue.size());
+	for(auto *pComponent : m_vpComponents)
+		UniqueComponents.insert(pComponent);
+	for(auto *pComponent : m_vpPlugQueue)
+		UniqueComponents.insert(pComponent);
+
+	std::vector<CServerComponent *> ToDestroy;
+	for(auto *pComponent : UniqueComponents)
+	{
+		ToDestroy.push_back(pComponent);
+	}
+
+	for(auto *pComponent : ToDestroy)
+	{
+		delete pComponent;
+	}
+
+	m_vpComponents.clear();
+	m_vpPlugQueue.clear();
 }
 
 void CGameContext::Clear()
@@ -194,12 +234,6 @@ void CGameContext::Clear()
 	m_Mutes = Mutes;
 	m_VoteMutes = VoteMutes;
 	std::swap(pMap, m_pMap);
-}
-
-void CGameContext::TeeHistorianWrite(const void *pData, int DataSize, void *pUser)
-{
-	CGameContext *pSelf = (CGameContext *)pUser;
-	aio_write(pSelf->m_pTeeHistorianFile, pData, DataSize);
 }
 
 std::optional<std::vector<int>> CGameContext::ClientsForVictim(int ClientId, const char *pVictim, void *pUser)
@@ -230,15 +264,6 @@ std::optional<std::vector<int>> CGameContext::ClientsForVictim(int ClientId, con
 	}
 
 	return std::make_optional(std::move(vClientIds));
-}
-
-void CGameContext::CommandCallback(int ClientId, int FlagMask, const char *pCmd, IConsole::IResult *pResult, void *pUser)
-{
-	CGameContext *pSelf = (CGameContext *)pUser;
-	if(pSelf->m_TeeHistorianActive)
-	{
-		pSelf->m_TeeHistorian.RecordConsoleCommand(ClientId, FlagMask, pCmd, pResult);
-	}
 }
 
 CNetObj_PlayerInput CGameContext::GetLastPlayerInput(int ClientId) const
@@ -1185,46 +1210,27 @@ void CGameContext::SendTuningParams(int ClientId, int Zone)
 
 void CGameContext::OnPreTickTeehistorian()
 {
-	if(!m_TeeHistorianActive)
-		return;
-
-	for(int i = 0; i < MAX_CLIENTS; i++)
-	{
-		if(m_apPlayers[i] != nullptr)
-			m_TeeHistorian.RecordPlayerTeam(i, GetDDRaceTeam(i));
-		else
-			m_TeeHistorian.RecordPlayerTeam(i, 0);
-	}
-	for(int i = 0; i < TEAM_SUPER; i++)
-	{
-		m_TeeHistorian.RecordTeamPractice(i, m_pController->Teams().IsPractice(i));
-	}
+	// TODO: OnPreTickTeehistorian -> OnPreTick?...
+	TeeHistorian()->OnPreTick();
 }
 
 void CGameContext::OnTick()
 {
-	if(m_TeeHistorianActive)
-	{
-		int Error = aio_error(m_pTeeHistorianFile);
-		if(Error)
-		{
-			dbg_msg("teehistorian", "error writing to file, err=%d", Error);
-			Server()->SetErrorShutdown("teehistorian io error");
-		}
+	// TODO: TeeHistorian()->OnTickBegin(*) -> OnTick()?
+	TeeHistorian()->OnTickBegin(Server()->Tick());
 
-		if(!m_TeeHistorian.Starting())
-		{
-			m_TeeHistorian.EndInputs();
-			m_TeeHistorian.EndTick();
-		}
-		m_TeeHistorian.BeginTick(Server()->Tick());
-		m_TeeHistorian.BeginPlayers();
+	for(auto &pComponent : m_vpComponents)
+	{
+		pComponent->OnTick();
 	}
 
 	// copy tuning
 	*m_World.GetTuning(0) = m_aTuningList[0];
 	m_World.Tick();
 	m_PlayerMapping.Tick();
+
+	HandleComponentsPlugQueue();
+	UnplugDisabledComponents();
 
 	m_pController->Tick();
 
@@ -1509,24 +1515,7 @@ void CGameContext::OnTick()
 	}
 
 	// Record player position at the end of the tick
-	if(m_TeeHistorianActive)
-	{
-		for(int i = 0; i < MAX_CLIENTS; i++)
-		{
-			if(m_apPlayers[i] && m_apPlayers[i]->GetCharacter())
-			{
-				CNetObj_CharacterCore Char;
-				m_apPlayers[i]->GetCharacter()->GetCore().Write(&Char);
-				m_TeeHistorian.RecordPlayer(i, &Char);
-			}
-			else
-			{
-				m_TeeHistorian.RecordDeadPlayer(i);
-			}
-		}
-		m_TeeHistorian.EndPlayers();
-		m_TeeHistorian.BeginInputs();
-	}
+	TeeHistorian()->OnTickPlayersEnd();
 	// Warning: do not put code in this function directly above or below this comment
 }
 
@@ -1632,10 +1621,7 @@ void CGameContext::OnClientPredictedEarlyInput(int ClientId, const void *pInput)
 	if(!m_pController->IsGamePaused())
 		m_apPlayers[ClientId]->OnPredictedEarlyInput(pApplyInput);
 
-	if(m_TeeHistorianActive)
-	{
-		m_TeeHistorian.RecordPlayerInput(ClientId, m_apPlayers[ClientId]->GetUniqueCid(), pApplyInput);
-	}
+	TeeHistorian()->RecordPlayerInput(ClientId, m_apPlayers[ClientId]->GetUniqueCid(), pApplyInput);
 }
 
 void CGameContext::ProgressVoteOptions(int ClientId)
@@ -1730,10 +1716,7 @@ void CGameContext::ProgressVoteOptions(int ClientId)
 
 void CGameContext::OnClientEnter(int ClientId)
 {
-	if(m_TeeHistorianActive)
-	{
-		m_TeeHistorian.RecordPlayerReady(ClientId);
-	}
+	TeeHistorian()->RecordPlayerReady(ClientId);
 	m_pController->OnPlayerConnect(m_apPlayers[ClientId]);
 
 	IServer::CClientInfo Info;
@@ -1914,66 +1897,42 @@ void CGameContext::OnClientDrop(int ClientId, const char *pReason)
 
 void CGameContext::TeehistorianRecordAntibot(const void *pData, int DataSize)
 {
-	if(m_TeeHistorianActive)
-	{
-		m_TeeHistorian.RecordAntibot(pData, DataSize);
-	}
+	TeeHistorian()->RecordAntibot(pData, DataSize);
 }
 
 void CGameContext::TeehistorianRecordPlayerJoin(int ClientId, bool Sixup)
 {
-	if(m_TeeHistorianActive)
-	{
-		m_TeeHistorian.RecordPlayerJoin(ClientId, !Sixup ? CTeeHistorian::PROTOCOL_6 : CTeeHistorian::PROTOCOL_7);
-	}
+	TeeHistorian()->RecordPlayerJoin(ClientId, !Sixup ? CTeeHistorian::PROTOCOL_6 : CTeeHistorian::PROTOCOL_7);
 }
 
 void CGameContext::TeehistorianRecordPlayerDrop(int ClientId, const char *pReason)
 {
-	if(m_TeeHistorianActive)
-	{
-		m_TeeHistorian.RecordPlayerDrop(ClientId, pReason);
-	}
+	TeeHistorian()->RecordPlayerDrop(ClientId, pReason);
 }
 
 void CGameContext::TeehistorianRecordPlayerRejoin(int ClientId)
 {
-	if(m_TeeHistorianActive)
-	{
-		m_TeeHistorian.RecordPlayerRejoin(ClientId);
-	}
+	TeeHistorian()->RecordPlayerRejoin(ClientId);
 }
 
 void CGameContext::TeehistorianRecordPlayerName(int ClientId, const char *pName)
 {
-	if(m_TeeHistorianActive)
-	{
-		m_TeeHistorian.RecordPlayerName(ClientId, pName);
-	}
+	TeeHistorian()->RecordPlayerName(ClientId, pName);
 }
 
 void CGameContext::TeehistorianRecordPlayerFinish(int ClientId, int TimeTicks)
 {
-	if(m_TeeHistorianActive)
-	{
-		m_TeeHistorian.RecordPlayerFinish(ClientId, TimeTicks);
-	}
+	TeeHistorian()->RecordPlayerFinish(ClientId, TimeTicks);
 }
 
 void CGameContext::TeehistorianRecordTeamFinish(int TeamId, int TimeTicks)
 {
-	if(m_TeeHistorianActive)
-	{
-		m_TeeHistorian.RecordTeamFinish(TeamId, TimeTicks);
-	}
+	TeeHistorian()->RecordTeamFinish(TeamId, TimeTicks);
 }
 
 void CGameContext::TeehistorianRecordAuthLogin(int ClientId, int Level, const char *pAuthName)
 {
-	if(m_TeeHistorianActive)
-	{
-		m_TeeHistorian.RecordAuthLogin(ClientId, Level, pAuthName);
-	}
+	TeeHistorian()->RecordAuthLogin(ClientId, Level, pAuthName);
 }
 
 bool CGameContext::OnClientDDNetVersionKnown(int ClientId)
@@ -1983,16 +1942,13 @@ bool CGameContext::OnClientDDNetVersionKnown(int ClientId)
 	int ClientVersion = Info.m_DDNetVersion;
 	dbg_msg("ddnet", "cid=%d version=%d", ClientId, ClientVersion);
 
-	if(m_TeeHistorianActive)
+	if(Info.m_pConnectionId && Info.m_pDDNetVersionStr)
 	{
-		if(Info.m_pConnectionId && Info.m_pDDNetVersionStr)
-		{
-			m_TeeHistorian.RecordDDNetVersion(ClientId, *Info.m_pConnectionId, ClientVersion, Info.m_pDDNetVersionStr);
-		}
-		else
-		{
-			m_TeeHistorian.RecordDDNetVersionOld(ClientId, ClientVersion);
-		}
+		TeeHistorian()->RecordDDNetVersion(ClientId, *Info.m_pConnectionId, ClientVersion, Info.m_pDDNetVersionStr);
+	}
+	else
+	{
+		TeeHistorian()->RecordDDNetVersionOld(ClientId, ClientVersion);
 	}
 
 	// Autoban known bot versions.
@@ -2200,12 +2156,9 @@ void CGameContext::CensorMessage(char *pCensoredMessage, const char *pMessage, i
 
 void CGameContext::OnMessage(int MsgId, CUnpacker *pUnpacker, int ClientId)
 {
-	if(m_TeeHistorianActive)
+	if(m_NetObjHandler.TeeHistorianRecordMsg(MsgId))
 	{
-		if(m_NetObjHandler.TeeHistorianRecordMsg(MsgId))
-		{
-			m_TeeHistorian.RecordPlayerMessage(ClientId, pUnpacker->CompleteData(), pUnpacker->CompleteSize());
-		}
+		TeeHistorian()->RecordPlayerMessage(ClientId, pUnpacker->CompleteData(), pUnpacker->CompleteSize());
 	}
 
 	void *pRawMsg = PreProcessMsg(&MsgId, pUnpacker, ClientId);
@@ -2274,10 +2227,8 @@ void CGameContext::OnSayNetMessage(const CNetMsg_Cl_Say *pMsg, int ClientId, con
 	bool Check = !pPlayer->m_NotEligibleForFinish && pPlayer->m_EligibleForFinishCheck + 10 * time_freq() >= time_get();
 	if(Check && str_comp(pMsg->m_pMessage, "xd sure chillerbot.png is lyfe") == 0 && pMsg->m_Team == 0)
 	{
-		if(m_TeeHistorianActive)
-		{
-			m_TeeHistorian.RecordPlayerMessage(ClientId, pUnpacker->CompleteData(), pUnpacker->CompleteSize());
-		}
+		// TODO: OnChatMessage()?
+		TeeHistorian()->RecordPlayerMessage(ClientId, pUnpacker->CompleteData(), pUnpacker->CompleteSize());
 
 		pPlayer->m_NotEligibleForFinish = true;
 		dbg_msg("hack", "bot detected, cid=%d", ClientId);
@@ -3910,6 +3861,11 @@ void CGameContext::OnConsoleInit()
 
 	RegisterDDRaceCommands();
 	RegisterChatCommands();
+
+	for(auto &pComponent : m_vpComponents)
+	{
+		pComponent->OnConsoleInit(m_pConsole);
+	}
 }
 
 void CGameContext::RegisterDDRaceCommands()
@@ -4096,8 +4052,6 @@ void CGameContext::RegisterChatCommands()
 
 void CGameContext::OnInit(const void *pPersistentData)
 {
-	const CPersistentData *pPersistent = (const CPersistentData *)pPersistentData;
-
 	m_pServer = Kernel()->RequestInterface<IServer>();
 	m_pConfigManager = Kernel()->RequestInterface<IConfigManager>();
 	m_pConfig = m_pConfigManager->Values();
@@ -4111,7 +4065,6 @@ void CGameContext::OnInit(const void *pPersistentData)
 
 	m_GameUuid = RandomUuid();
 	Console()->SetGetVictimsCommandCallback(ClientsForVictim, this);
-	Console()->SetTeeHistorianCommandCallback(CommandCallback, this);
 
 	uint64_t aSeed[2];
 	secure_random_fill(aSeed, sizeof(aSeed));
@@ -4221,70 +4174,6 @@ void CGameContext::OnInit(const void *pPersistentData)
 
 	ReadCensorList();
 
-	m_TeeHistorianActive = g_Config.m_SvTeeHistorian;
-	if(m_TeeHistorianActive)
-	{
-		char aGameUuid[UUID_MAXSTRSIZE];
-		FormatUuid(m_GameUuid, aGameUuid, sizeof(aGameUuid));
-
-		char aFilename[IO_MAX_PATH_LENGTH];
-		str_format(aFilename, sizeof(aFilename), "teehistorian/%s.teehistorian", aGameUuid);
-
-		IOHANDLE THFile = Storage()->OpenFile(aFilename, IOFLAG_WRITE, IStorage::TYPE_SAVE);
-		if(!THFile)
-		{
-			dbg_msg("teehistorian", "failed to open '%s'", aFilename);
-			Server()->SetErrorShutdown("teehistorian open error");
-			return;
-		}
-		else
-		{
-			dbg_msg("teehistorian", "recording to '%s'", aFilename);
-		}
-		m_pTeeHistorianFile = aio_new(THFile);
-
-		char aVersion[128];
-		if(GIT_SHORTREV_HASH)
-		{
-			str_format(aVersion, sizeof(aVersion), "%s (%s)", GAME_VERSION, GIT_SHORTREV_HASH);
-		}
-		else
-		{
-			str_copy(aVersion, GAME_VERSION);
-		}
-		CTeeHistorian::CGameInfo GameInfo;
-		GameInfo.m_GameUuid = m_GameUuid;
-		GameInfo.m_pServerVersion = aVersion;
-		GameInfo.m_StartTime = time(nullptr);
-		GameInfo.m_pPrngDescription = m_Prng.Description();
-
-		GameInfo.m_pServerName = g_Config.m_SvName;
-		GameInfo.m_ServerPort = Server()->Port();
-		GameInfo.m_pGameType = m_pController->m_pGameType;
-
-		GameInfo.m_pConfig = &g_Config;
-		GameInfo.m_pTuning = GlobalTuning();
-		GameInfo.m_pUuids = &g_UuidManager;
-
-		GameInfo.m_pMapName = Map()->BaseName();
-		GameInfo.m_MapSize = Map()->Size();
-		GameInfo.m_MapSha256 = Map()->Sha256();
-		GameInfo.m_MapCrc = Map()->Crc();
-
-		if(pPersistent)
-		{
-			GameInfo.m_HavePrevGameUuid = true;
-			GameInfo.m_PrevGameUuid = pPersistent->m_PrevGameUuid;
-		}
-		else
-		{
-			GameInfo.m_HavePrevGameUuid = false;
-			mem_zero(&GameInfo.m_PrevGameUuid, sizeof(GameInfo.m_PrevGameUuid));
-		}
-
-		m_TeeHistorian.Reset(&GameInfo, TeeHistorianWrite, this);
-	}
-
 	Server()->DemoRecorder_HandleAutoStart();
 
 	if(!m_pScore)
@@ -4299,6 +4188,11 @@ void CGameContext::OnInit(const void *pPersistentData)
 	CreateAllEntities(true);
 
 	m_pAntibot->RoundStart(this);
+
+	for(auto &pComponent : m_vpComponents)
+	{
+		pComponent->OnInit(pPersistentData);
+	}
 }
 
 void CGameContext::CreateAllEntities(bool Initial)
@@ -4554,18 +4448,9 @@ void CGameContext::OnShutdown(void *pPersistentData)
 
 	Antibot()->RoundEnd();
 
-	if(m_TeeHistorianActive)
+	for(auto &pComponent : m_vpComponents)
 	{
-		m_TeeHistorian.Finish();
-		aio_close(m_pTeeHistorianFile);
-		aio_wait(m_pTeeHistorianFile);
-		int Error = aio_error(m_pTeeHistorianFile);
-		if(Error)
-		{
-			dbg_msg("teehistorian", "error closing file, err=%d", Error);
-			Server()->SetErrorShutdown("teehistorian close error");
-		}
-		aio_free(m_pTeeHistorianFile);
+		pComponent->OnShutdown(pPersistentData);
 	}
 
 	// Stop any demos being recorded.
@@ -4642,6 +4527,11 @@ void CGameContext::OnSnap(int ClientId, bool GlobalSnap, bool RecordingDemo)
 	if(ClientId > -1)
 		m_apPlayers[ClientId]->FakeSnap();
 
+	for(auto &pComponent : m_vpComponents)
+	{
+		pComponent->OnSnap(ClientId);
+	}
+
 	m_World.Snap(ClientId);
 
 	// events are only sent on global snapshots
@@ -4703,16 +4593,14 @@ void CGameContext::OnSetAuthed(int ClientId, int Level)
 		}
 	}
 
-	if(m_TeeHistorianActive)
+	// TODO: OnRconAuthed?
+	if(Level != AUTHED_NO)
 	{
-		if(Level != AUTHED_NO)
-		{
-			m_TeeHistorian.RecordAuthLogin(ClientId, Level, Server()->GetAuthName(ClientId));
-		}
-		else
-		{
-			m_TeeHistorian.RecordAuthLogout(ClientId);
-		}
+		TeeHistorian()->RecordAuthLogin(ClientId, Level, Server()->GetAuthName(ClientId));
+	}
+	else
+	{
+		TeeHistorian()->RecordAuthLogout(ClientId);
 	}
 }
 
@@ -5463,4 +5351,55 @@ void CGameContext::ReinitPlayerMap(int ClientId, bool Timeout)
 	SixupCfg.m_SkipTimeoutedId = Timeout;
 	SixupCfg.m_ClearSlots = true;
 	m_PlayerMapping.InitPlayerMap(ClientId, SixupCfg);
+}
+
+void CGameContext::HandleComponentsPlugQueue()
+{
+	if(m_vpPlugQueue.empty())
+		return;
+
+	for(auto &pComponent : m_vpPlugQueue)
+	{
+		// TODO: trace -> info?
+		log_trace("components", "'%s' component plugged. (%p)", pComponent->GetComponentName(), pComponent);
+		// should be inserted to vector beginning, otherwise bugs with handling order
+		m_vpComponents.insert(m_vpComponents.begin(), pComponent);
+		pComponent->SetEnabled(true);
+		pComponent->OnInit(nullptr);
+		pComponent->OnTick();
+	}
+
+	m_vpPlugQueue.clear();
+}
+
+void CGameContext::UnplugDisabledComponents()
+{
+	for(auto It = m_vpComponents.begin(); It != m_vpComponents.end();)
+	{
+		CServerComponent *pComponent = *It;
+		bool Destroy = pComponent->IsMarkedToDestroy();
+		if(pComponent->IsDisabled() || Destroy)
+		{
+			// TODO: trace -> info?
+			log_trace("components", "'%s' component unplugged. (%p) destroy=%d", pComponent->GetComponentName(), pComponent, Destroy);
+
+			if(Destroy)
+			{
+				std::erase(m_vpPlugQueue, pComponent);
+				delete pComponent;
+			}
+
+			It = m_vpComponents.erase(It);
+		}
+		else
+		{
+			++It;
+		}
+	}
+}
+
+void CGameContext::AddToPlugQueue(CServerComponent *pComponent)
+{
+	pComponent->SetGameServer(this);
+	m_vpPlugQueue.emplace_back(pComponent);
 }

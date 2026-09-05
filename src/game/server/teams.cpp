@@ -4,7 +4,6 @@
 #include "gamecontroller.h"
 #include "player.h"
 #include "score.h"
-#include "teehistorian.h"
 
 #include <base/dbg.h>
 #include <base/str.h>
@@ -14,6 +13,7 @@
 #include <engine/shared/protocol.h>
 
 #include <game/mapitems.h>
+#include <game/server/components/teehistorian.h>
 #include <game/server/entities/character.h>
 #include <game/server/gamecontext.h>
 #include <game/server/interactions.h>
@@ -1094,10 +1094,7 @@ void CGameTeams::SwapTeamCharacters(CPlayer *pPrimaryPlayer, CPlayer *pTargetPla
 
 	GameServer()->m_World.SwapClients(pPrimaryPlayer->GetCid(), pTargetPlayer->GetCid());
 
-	if(GameServer()->TeeHistorianActive())
-	{
-		GameServer()->TeeHistorian()->RecordPlayerSwap(pPrimaryPlayer->GetCid(), pTargetPlayer->GetCid());
-	}
+	GameServer()->TeeHistorian()->RecordPlayerSwap(pPrimaryPlayer->GetCid(), pTargetPlayer->GetCid());
 
 	str_format(aBuf, sizeof(aBuf),
 		"%s has swapped with %s.",
@@ -1196,16 +1193,14 @@ void CGameTeams::ProcessSaveTeam()
 		case CScoreSaveResult::SAVE_WARNING:
 		case CScoreSaveResult::SAVE_SUCCESS:
 		{
-			if(GameServer()->TeeHistorianActive())
+			// TODO: OnSaveTeam(int Team, int Status)?
+			const char *pSaveState = m_apSaveTeamResult[Team]->m_SavedTeam.GetString();
+			if(pSaveState)
 			{
-				const char *pSaveState = m_apSaveTeamResult[Team]->m_SavedTeam.GetString();
-				if(pSaveState)
-				{
-					GameServer()->TeeHistorian()->RecordTeamSaveSuccess(
-						Team,
-						m_apSaveTeamResult[Team]->m_SaveId,
-						pSaveState);
-				}
+				GameServer()->TeeHistorian()->RecordTeamSaveSuccess(
+					Team,
+					m_apSaveTeamResult[Team]->m_SaveId,
+					pSaveState);
 			}
 			for(int i = 0; i < Size; i++)
 			{
@@ -1223,8 +1218,7 @@ void CGameTeams::ProcessSaveTeam()
 			break;
 		}
 		case CScoreSaveResult::SAVE_FAILED:
-			if(GameServer()->TeeHistorianActive())
-				GameServer()->TeeHistorian()->RecordTeamSaveFailure(Team);
+			GameServer()->TeeHistorian()->RecordTeamSaveFailure(Team);
 			if(TeamSize(Team) > 0)
 			{
 				// load weak/strong order to prevent switching weak/strong while saving
@@ -1233,16 +1227,13 @@ void CGameTeams::ProcessSaveTeam()
 			break;
 		case CScoreSaveResult::LOAD_SUCCESS:
 		{
-			if(GameServer()->TeeHistorianActive())
+			const char *pSaveState = m_apSaveTeamResult[Team]->m_SavedTeam.GetString();
+			if(pSaveState)
 			{
-				const char *pSaveState = m_apSaveTeamResult[Team]->m_SavedTeam.GetString();
-				if(pSaveState)
-				{
-					GameServer()->TeeHistorian()->RecordTeamLoadSuccess(
-						Team,
-						m_apSaveTeamResult[Team]->m_SaveId,
-						pSaveState);
-				}
+				GameServer()->TeeHistorian()->RecordTeamLoadSuccess(
+					Team,
+					m_apSaveTeamResult[Team]->m_SaveId,
+					pSaveState);
 			}
 
 			bool TeamValid = false;
@@ -1264,8 +1255,7 @@ void CGameTeams::ProcessSaveTeam()
 			break;
 		}
 		case CScoreSaveResult::LOAD_FAILED:
-			if(GameServer()->TeeHistorianActive())
-				GameServer()->TeeHistorian()->RecordTeamLoadFailure(Team);
+			GameServer()->TeeHistorian()->RecordTeamLoadFailure(Team);
 			if(m_apSaveTeamResult[Team]->m_aMessage[0] != '\0')
 				GameServer()->SendChatTarget(m_apSaveTeamResult[Team]->m_RequestingPlayer, m_apSaveTeamResult[Team]->m_aMessage);
 			break;

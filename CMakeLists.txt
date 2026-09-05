@@ -3135,6 +3135,9 @@ if(SERVER)
 
   set_src(GAME_SERVER GLOB_RECURSE src/game/server
     # tidy-alphabetical-start
+    components.h
+    components/teehistorian.cpp
+    components/teehistorian.h
     ddracechat.cpp
     ddracecommands.cpp
     entities/character.cpp
@@ -3184,6 +3187,8 @@ if(SERVER)
     score.h
     scoreworker.cpp
     scoreworker.h
+    server_component.cpp
+    server_component.h
     teams.cpp
     teams.h
     teehistorian.cpp
