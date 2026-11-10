@@ -1030,6 +1030,17 @@ private:
 	SPipelineContainer m_QuadGroupedPipeline;
 
 	std::vector<VkPipeline> m_vLastPipeline;
+	struct SRenderThreadCachedState
+	{
+		VkPipeline m_LastPipeline = VK_NULL_HANDLE;
+		VkBuffer m_LastVertexBuffer = VK_NULL_HANDLE;
+		VkDeviceSize m_LastVertexOffset = (VkDeviceSize)-1;
+		VkBuffer m_LastIndexBuffer = VK_NULL_HANDLE;
+		VkDeviceSize m_LastIndexOffset = (VkDeviceSize)-1;
+		VkPipelineLayout m_LastDescriptorPipeLayout = VK_NULL_HANDLE;
+		VkDescriptorSet m_LastDescriptorSet = VK_NULL_HANDLE;
+	};
+	std::vector<SRenderThreadCachedState> m_vThreadCachedState;
 
 	std::vector<VkCommandPool> m_vCommandPools;
 
@@ -2246,6 +2257,7 @@ protected:
 					std::unique_lock<std::mutex> Lock(pRenderThread->m_Mutex);
 					pRenderThread->m_Cond.wait(Lock, [&pRenderThread] { return !pRenderThread->m_IsRendering; });
 					m_vLastPipeline[ThreadIndex + 1] = VK_NULL_HANDLE;
+					m_vThreadCachedState[ThreadIndex + 1] = {};
 				}
 			}
 		}
@@ -2491,6 +2503,8 @@ protected:
 
 		for(auto &LastPipe : m_vLastPipeline)
 			LastPipe = VK_NULL_HANDLE;
+		for(auto &CachedState : m_vThreadCachedState)
+			CachedState = {};
 
 		return true;
 	}
@@ -3378,6 +3392,8 @@ protected:
 		{
 			vkCmdBindPipeline(CommandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, BindingPipe);
 			m_vLastPipeline[RenderThreadIndex] = BindingPipe;
+			m_vThreadCachedState[RenderThreadIndex].m_LastDescriptorSet = VK_NULL_HANDLE;
+			m_vThreadCachedState[RenderThreadIndex].m_LastDescriptorPipeLayout = VK_NULL_HANDLE;
 		}
 
 		size_t DynamicStateIndex = GetDynamicModeIndexFromExecBuffer(ExecBuffer);
@@ -3385,6 +3401,39 @@ protected:
 		{
 			vkCmdSetViewport(CommandBuffer, 0, 1, &ExecBuffer.m_Viewport);
 			vkCmdSetScissor(CommandBuffer, 0, 1, &ExecBuffer.m_Scissor);
+		}
+	}
+
+	void BindVertexBuffer(size_t RenderThreadIndex, VkCommandBuffer &CommandBuffer, VkBuffer Buffer, VkDeviceSize Offset)
+	{
+		auto &State = m_vThreadCachedState[RenderThreadIndex];
+		if(State.m_LastVertexBuffer != Buffer || State.m_LastVertexOffset != Offset)
+		{
+			vkCmdBindVertexBuffers(CommandBuffer, 0, 1, &Buffer, &Offset);
+			State.m_LastVertexBuffer = Buffer;
+			State.m_LastVertexOffset = Offset;
+		}
+	}
+
+	void BindIndexBuffer(size_t RenderThreadIndex, VkCommandBuffer &CommandBuffer, VkBuffer Buffer, VkDeviceSize Offset, VkIndexType IndexType)
+	{
+		auto &State = m_vThreadCachedState[RenderThreadIndex];
+		if(State.m_LastIndexBuffer != Buffer || State.m_LastIndexOffset != Offset)
+		{
+			vkCmdBindIndexBuffer(CommandBuffer, Buffer, Offset, IndexType);
+			State.m_LastIndexBuffer = Buffer;
+			State.m_LastIndexOffset = Offset;
+		}
+	}
+
+	void BindDescriptorSet(size_t RenderThreadIndex, VkCommandBuffer &CommandBuffer, VkPipelineLayout PipeLayout, VkDescriptorSet DescriptorSet)
+	{
+		auto &State = m_vThreadCachedState[RenderThreadIndex];
+		if(State.m_LastDescriptorSet != DescriptorSet || State.m_LastDescriptorPipeLayout != PipeLayout)
+		{
+			vkCmdBindDescriptorSets(CommandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, PipeLayout, 0, 1, &DescriptorSet, 0, nullptr);
+			State.m_LastDescriptorSet = DescriptorSet;
+			State.m_LastDescriptorPipeLayout = PipeLayout;
 		}
 	}
 
@@ -3433,13 +3482,11 @@ protected:
 
 		BindPipeline(ExecBuffer.m_ThreadIndex, CommandBuffer, ExecBuffer, PipeLine, State);
 
-		std::array<VkBuffer, 1> aVertexBuffers = {ExecBuffer.m_Buffer};
-		std::array<VkDeviceSize, 1> aOffsets = {(VkDeviceSize)ExecBuffer.m_BufferOff};
-		vkCmdBindVertexBuffers(CommandBuffer, 0, 1, aVertexBuffers.data(), aOffsets.data());
+		BindVertexBuffer(ExecBuffer.m_ThreadIndex, CommandBuffer, ExecBuffer.m_Buffer, (VkDeviceSize)ExecBuffer.m_BufferOff);
 
 		if(IsTextured)
 		{
-			vkCmdBindDescriptorSets(CommandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, PipeLayout, 0, 1, &ExecBuffer.m_aDescriptors[0].m_Descriptor, 0, nullptr);
+			BindDescriptorSet(ExecBuffer.m_ThreadIndex, CommandBuffer, PipeLayout, ExecBuffer.m_aDescriptors[0].m_Descriptor);
 		}
 
 		SUniformTileGPosBorder VertexPushConstants;
@@ -3461,7 +3508,7 @@ protected:
 		vkCmdPushConstants(CommandBuffer, PipeLayout, VK_SHADER_STAGE_FRAGMENT_BIT, sizeof(SUniformTileGPosBorder) + sizeof(SUniformTileGVertColorAlign), FragPushConstantSize, &FragPushConstants);
 
 		size_t DrawCount = IndicesDrawNum;
-		vkCmdBindIndexBuffer(CommandBuffer, ExecBuffer.m_IndexBuffer, 0, VK_INDEX_TYPE_UINT32);
+		BindIndexBuffer(ExecBuffer.m_ThreadIndex, CommandBuffer, ExecBuffer.m_IndexBuffer, 0, VK_INDEX_TYPE_UINT32);
 		for(size_t i = 0; i < DrawCount; ++i)
 		{
 			VkDeviceSize IndexOffset = (VkDeviceSize)((ptrdiff_t)pIndicesOffsets[i] / sizeof(uint32_t));
@@ -3513,16 +3560,14 @@ protected:
 		if(!CreateStreamVertexBuffer(ExecBuffer.m_ThreadIndex, VKBuffer, VKBufferMem, BufferOff, pVertices, VertPerPrim * sizeof(TName) * PrimitiveCount))
 			return false;
 
-		std::array<VkBuffer, 1> aVertexBuffers = {VKBuffer};
-		std::array<VkDeviceSize, 1> aOffsets = {(VkDeviceSize)BufferOff};
-		vkCmdBindVertexBuffers(CommandBuffer, 0, 1, aVertexBuffers.data(), aOffsets.data());
+		BindVertexBuffer(ExecBuffer.m_ThreadIndex, CommandBuffer, VKBuffer, (VkDeviceSize)BufferOff);
 
 		if(IsIndexed)
-			vkCmdBindIndexBuffer(CommandBuffer, ExecBuffer.m_IndexBuffer, 0, VK_INDEX_TYPE_UINT32);
+			BindIndexBuffer(ExecBuffer.m_ThreadIndex, CommandBuffer, ExecBuffer.m_IndexBuffer, 0, VK_INDEX_TYPE_UINT32);
 
 		if(IsTextured)
 		{
-			vkCmdBindDescriptorSets(CommandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, PipeLayout, 0, 1, &ExecBuffer.m_aDescriptors[0].m_Descriptor, 0, nullptr);
+			BindDescriptorSet(ExecBuffer.m_ThreadIndex, CommandBuffer, PipeLayout, ExecBuffer.m_aDescriptors[0].m_Descriptor);
 		}
 
 		vkCmdPushConstants(CommandBuffer, PipeLayout, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(SUniformGPos), m.data());
@@ -5596,6 +5641,7 @@ public:
 		m_vImageLastFrameCheck.clear();
 
 		m_vLastPipeline.clear();
+		m_vThreadCachedState.clear();
 
 		for(size_t i = 0; i < m_ThreadCount; ++i)
 		{
@@ -6295,6 +6341,7 @@ public:
 		}
 
 		m_vLastPipeline.resize(m_ThreadCount, VK_NULL_HANDLE);
+		m_vThreadCachedState.resize(m_ThreadCount);
 
 		m_vvFrameDelayedBufferCleanup.resize(m_SwapChainImageCount);
 		m_vvFrameDelayedTextureCleanup.resize(m_SwapChainImageCount);
@@ -7260,15 +7307,13 @@ public:
 
 		BindPipeline(ExecBuffer.m_ThreadIndex, CommandBuffer, ExecBuffer, PipeLine, pCommand->m_State);
 
-		std::array<VkBuffer, 1> aVertexBuffers = {ExecBuffer.m_Buffer};
-		std::array<VkDeviceSize, 1> aOffsets = {(VkDeviceSize)ExecBuffer.m_BufferOff};
-		vkCmdBindVertexBuffers(CommandBuffer, 0, 1, aVertexBuffers.data(), aOffsets.data());
+		BindVertexBuffer(ExecBuffer.m_ThreadIndex, CommandBuffer, ExecBuffer.m_Buffer, (VkDeviceSize)ExecBuffer.m_BufferOff);
 
-		vkCmdBindIndexBuffer(CommandBuffer, ExecBuffer.m_IndexBuffer, 0, VK_INDEX_TYPE_UINT32);
+		BindIndexBuffer(ExecBuffer.m_ThreadIndex, CommandBuffer, ExecBuffer.m_IndexBuffer, 0, VK_INDEX_TYPE_UINT32);
 
 		if(IsTextured)
 		{
-			vkCmdBindDescriptorSets(CommandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, PipeLayout, 0, 1, &ExecBuffer.m_aDescriptors[0].m_Descriptor, 0, nullptr);
+			BindDescriptorSet(ExecBuffer.m_ThreadIndex, CommandBuffer, PipeLayout, ExecBuffer.m_aDescriptors[0].m_Descriptor);
 		}
 
 		uint32_t DrawCount = (uint32_t)pCommand->m_QuadNum;
@@ -7358,13 +7403,11 @@ public:
 
 		BindPipeline(ExecBuffer.m_ThreadIndex, CommandBuffer, ExecBuffer, PipeLine, pCommand->m_State);
 
-		std::array<VkBuffer, 1> aVertexBuffers = {ExecBuffer.m_Buffer};
-		std::array<VkDeviceSize, 1> aOffsets = {(VkDeviceSize)ExecBuffer.m_BufferOff};
-		vkCmdBindVertexBuffers(CommandBuffer, 0, 1, aVertexBuffers.data(), aOffsets.data());
+		BindVertexBuffer(ExecBuffer.m_ThreadIndex, CommandBuffer, ExecBuffer.m_Buffer, (VkDeviceSize)ExecBuffer.m_BufferOff);
 
-		vkCmdBindIndexBuffer(CommandBuffer, ExecBuffer.m_IndexBuffer, 0, VK_INDEX_TYPE_UINT32);
+		BindIndexBuffer(ExecBuffer.m_ThreadIndex, CommandBuffer, ExecBuffer.m_IndexBuffer, 0, VK_INDEX_TYPE_UINT32);
 
-		vkCmdBindDescriptorSets(CommandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, PipeLayout, 0, 1, &ExecBuffer.m_aDescriptors[0].m_Descriptor, 0, nullptr);
+		BindDescriptorSet(ExecBuffer.m_ThreadIndex, CommandBuffer, PipeLayout, ExecBuffer.m_aDescriptors[0].m_Descriptor);
 
 		SUniformGTextPos PosTexSizeConstant;
 		mem_copy(PosTexSizeConstant.m_aPos, m.data(), m.size() * sizeof(float));
@@ -7430,17 +7473,15 @@ public:
 
 		BindPipeline(ExecBuffer.m_ThreadIndex, CommandBuffer, ExecBuffer, PipeLine, pCommand->m_State);
 
-		std::array<VkBuffer, 1> aVertexBuffers = {ExecBuffer.m_Buffer};
-		std::array<VkDeviceSize, 1> aOffsets = {(VkDeviceSize)ExecBuffer.m_BufferOff};
-		vkCmdBindVertexBuffers(CommandBuffer, 0, 1, aVertexBuffers.data(), aOffsets.data());
+		BindVertexBuffer(ExecBuffer.m_ThreadIndex, CommandBuffer, ExecBuffer.m_Buffer, (VkDeviceSize)ExecBuffer.m_BufferOff);
 
 		VkDeviceSize IndexOffset = (VkDeviceSize)((ptrdiff_t)pCommand->m_pOffset);
 
-		vkCmdBindIndexBuffer(CommandBuffer, ExecBuffer.m_IndexBuffer, IndexOffset, VK_INDEX_TYPE_UINT32);
+		BindIndexBuffer(ExecBuffer.m_ThreadIndex, CommandBuffer, ExecBuffer.m_IndexBuffer, IndexOffset, VK_INDEX_TYPE_UINT32);
 
 		if(IsTextured)
 		{
-			vkCmdBindDescriptorSets(CommandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, PipeLayout, 0, 1, &ExecBuffer.m_aDescriptors[0].m_Descriptor, 0, nullptr);
+			BindDescriptorSet(ExecBuffer.m_ThreadIndex, CommandBuffer, PipeLayout, ExecBuffer.m_aDescriptors[0].m_Descriptor);
 		}
 
 		vkCmdPushConstants(CommandBuffer, PipeLayout, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(SUniformGPos), m.data());
@@ -7476,17 +7517,15 @@ public:
 
 		BindPipeline(ExecBuffer.m_ThreadIndex, CommandBuffer, ExecBuffer, PipeLine, pCommand->m_State);
 
-		std::array<VkBuffer, 1> aVertexBuffers = {ExecBuffer.m_Buffer};
-		std::array<VkDeviceSize, 1> aOffsets = {(VkDeviceSize)ExecBuffer.m_BufferOff};
-		vkCmdBindVertexBuffers(CommandBuffer, 0, 1, aVertexBuffers.data(), aOffsets.data());
+		BindVertexBuffer(ExecBuffer.m_ThreadIndex, CommandBuffer, ExecBuffer.m_Buffer, (VkDeviceSize)ExecBuffer.m_BufferOff);
 
 		VkDeviceSize IndexOffset = (VkDeviceSize)((ptrdiff_t)pCommand->m_pOffset);
 
-		vkCmdBindIndexBuffer(CommandBuffer, ExecBuffer.m_IndexBuffer, IndexOffset, VK_INDEX_TYPE_UINT32);
+		BindIndexBuffer(ExecBuffer.m_ThreadIndex, CommandBuffer, ExecBuffer.m_IndexBuffer, IndexOffset, VK_INDEX_TYPE_UINT32);
 
 		if(IsTextured)
 		{
-			vkCmdBindDescriptorSets(CommandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, PipeLayout, 0, 1, &ExecBuffer.m_aDescriptors[0].m_Descriptor, 0, nullptr);
+			BindDescriptorSet(ExecBuffer.m_ThreadIndex, CommandBuffer, PipeLayout, ExecBuffer.m_aDescriptors[0].m_Descriptor);
 		}
 
 		SUniformPrimExGVertColor PushConstantColor;
@@ -7541,14 +7580,12 @@ public:
 
 		BindPipeline(ExecBuffer.m_ThreadIndex, CommandBuffer, ExecBuffer, PipeLine, pCommand->m_State);
 
-		std::array<VkBuffer, 1> aVertexBuffers = {ExecBuffer.m_Buffer};
-		std::array<VkDeviceSize, 1> aOffsets = {(VkDeviceSize)ExecBuffer.m_BufferOff};
-		vkCmdBindVertexBuffers(CommandBuffer, 0, 1, aVertexBuffers.data(), aOffsets.data());
+		BindVertexBuffer(ExecBuffer.m_ThreadIndex, CommandBuffer, ExecBuffer.m_Buffer, (VkDeviceSize)ExecBuffer.m_BufferOff);
 
 		VkDeviceSize IndexOffset = (VkDeviceSize)((ptrdiff_t)pCommand->m_pOffset);
-		vkCmdBindIndexBuffer(CommandBuffer, ExecBuffer.m_IndexBuffer, IndexOffset, VK_INDEX_TYPE_UINT32);
+		BindIndexBuffer(ExecBuffer.m_ThreadIndex, CommandBuffer, ExecBuffer.m_IndexBuffer, IndexOffset, VK_INDEX_TYPE_UINT32);
 
-		vkCmdBindDescriptorSets(CommandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, PipeLayout, 0, 1, &ExecBuffer.m_aDescriptors[0].m_Descriptor, 0, nullptr);
+		BindDescriptorSet(ExecBuffer.m_ThreadIndex, CommandBuffer, PipeLayout, ExecBuffer.m_aDescriptors[0].m_Descriptor);
 
 		if(CanBePushed)
 		{

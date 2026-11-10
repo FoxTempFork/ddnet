@@ -93,7 +93,7 @@ private:
 #if !defined(CONF_PLATFORM_EMSCRIPTEN)
 	std::mutex m_BufferSwapMutex;
 	std::condition_variable m_BufferSwapCond;
-	CCommandBuffer *m_pBuffer;
+	std::atomic<CCommandBuffer *> m_pBuffer{nullptr};
 	bool m_Started = false;
 	std::atomic_bool m_BufferInProcess;
 	void *m_pThread;

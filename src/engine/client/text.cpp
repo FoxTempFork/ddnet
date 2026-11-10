@@ -324,6 +324,16 @@ private:
 	CAtlas m_TextureAtlas;
 	std::unordered_map<std::tuple<FT_Face, int, int>, SGlyph, SGlyphKeyHash, SGlyphKeyEquals> m_Glyphs;
 
+	struct SFastGlyphCacheEntry
+	{
+		int m_Chr = -1;
+		int m_FontSize = 0;
+		FT_Face m_Face = nullptr;
+		const SGlyph *m_pGlyph = nullptr;
+	};
+	static constexpr size_t FAST_GLYPH_CACHE_SIZE = 1024;
+	SFastGlyphCacheEntry m_aFastGlyphCache[FAST_GLYPH_CACHE_SIZE];
+
 	// Font faces
 	FT_Face m_DefaultFace = nullptr;
 	FT_Face m_IconFace = nullptr;
@@ -704,12 +714,26 @@ public:
 
 		m_TextureAtlas.Clear(m_TextureDimension);
 		m_Glyphs.clear();
+		for(auto &Entry : m_aFastGlyphCache)
+			Entry.m_Chr = -1;
 	}
 
 	const SGlyph *GetGlyph(int Chr, int FontSize)
 	{
 		FontSize = std::clamp(FontSize, MIN_FONT_SIZE, MAX_FONT_SIZE);
 
+		const size_t CacheHash = ((size_t)(uint32_t)Chr * 31 + (size_t)(uint32_t)FontSize + (size_t)m_SelectedFace) % FAST_GLYPH_CACHE_SIZE;
+		const SFastGlyphCacheEntry &Entry = m_aFastGlyphCache[CacheHash];
+		if(Entry.m_Chr == Chr && Entry.m_FontSize == FontSize && Entry.m_Face == m_SelectedFace)
+			return Entry.m_pGlyph;
+
+		const SGlyph *pGlyph = GetGlyphSlow(Chr, FontSize);
+		m_aFastGlyphCache[CacheHash] = {Chr, FontSize, m_SelectedFace, pGlyph};
+		return pGlyph;
+	}
+
+	const SGlyph *GetGlyphSlow(int Chr, int FontSize)
+	{
 		// Find glyph index and most appropriate font face.
 		FT_Face Face;
 		FT_UInt GlyphIndex = GetCharGlyph(Chr, &Face, false);

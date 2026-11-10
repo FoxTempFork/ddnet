@@ -788,6 +788,7 @@ void CClient::DisconnectWithReason(const char *pReason)
 	// 0.7
 	m_TranslationContext.Reset();
 	m_Sixup = false;
+	m_LastNetworkPumpTime = 0;
 }
 
 void CClient::Disconnect()
@@ -1091,8 +1092,26 @@ void CClient::RenderGraphs()
 	const float GraphSpacing = std::round(Graphics()->ScreenWidth() / 100.0f);
 	const float GraphX = Graphics()->ScreenWidth() - GraphW - GraphSpacing;
 
-	TextRender()->TextColor(TextRender()->DefaultTextColor());
-	TextRender()->Text(GraphX, GraphSpacing * 5 - 12.0f - 10.0f, 12.0f, Localize("Press Ctrl+Shift+G to disable debug graphs."));
+	const float HintX = GraphX;
+	const float HintY = GraphSpacing * 5 - 12.0f - 10.0f;
+	if(!m_DbgGraphsHintTextContainer.Valid() || HintX != m_DbgGraphsHintLastX || HintY != m_DbgGraphsHintLastY)
+	{
+		m_DbgGraphsHintLastX = HintX;
+		m_DbgGraphsHintLastY = HintY;
+		CTextCursor Cursor;
+		Cursor.m_FontSize = 12.0f;
+		Cursor.m_X = HintX;
+		Cursor.m_Y = HintY;
+		const char *pHint = Localize("Press Ctrl+Shift+G to disable debug graphs.");
+		if(m_DbgGraphsHintTextContainer.Valid())
+			TextRender()->RecreateTextContainerSoft(m_DbgGraphsHintTextContainer, &Cursor, pHint);
+		else
+			TextRender()->CreateTextContainer(m_DbgGraphsHintTextContainer, &Cursor, pHint);
+	}
+	if(m_DbgGraphsHintTextContainer.Valid())
+	{
+		TextRender()->RenderTextContainer(m_DbgGraphsHintTextContainer, TextRender()->DefaultTextColor(), TextRender()->DefaultTextOutlineColor());
+	}
 
 	m_FpsGraph.Scale(time_freq());
 	m_FpsGraph.Render(Graphics(), TextRender(), GraphX, GraphSpacing * 5, GraphW, GraphH, "FPS");
@@ -2670,6 +2689,15 @@ int CClient::ConnectNetTypes() const
 
 void CClient::PumpNetwork()
 {
+	const int64_t Now = time_get();
+	const int64_t Freq = time_freq();
+	const int64_t MinInterval = (State() == IClient::STATE_DEMOPLAYBACK) ? (Freq / 100) : (Freq / 1000);
+	if(m_LastNetworkPumpTime != 0 && (Now - m_LastNetworkPumpTime) < MinInterval)
+	{
+		return;
+	}
+	m_LastNetworkPumpTime = Now;
+
 #if defined(CONF_PLATFORM_IOS)
 	RecreateBrokenSockets();
 #endif
@@ -3555,6 +3583,15 @@ void CClient::Run()
 	// close sockets
 	for(unsigned int i = 0; i < std::size(m_aNetClient); i++)
 		m_aNetClient[i].Close();
+
+	// drop graph cached text containers
+	m_FpsGraph.DropTextContainers(m_pTextRender);
+	for(size_t i = 0; i < NUM_DUMMIES; ++i)
+	{
+		m_aInputtimeMarginGraphs[i].DropTextContainers(m_pTextRender);
+		m_aGametimeMarginGraphs[i].DropTextContainers(m_pTextRender);
+	}
+	m_pTextRender->DeleteTextContainer(m_DbgGraphsHintTextContainer);
 
 	// shutdown text render while graphics are still available
 	m_pTextRender->Shutdown();
