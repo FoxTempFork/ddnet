@@ -788,6 +788,7 @@ void CClient::DisconnectWithReason(const char *pReason)
 	// 0.7
 	m_TranslationContext.Reset();
 	m_Sixup = false;
+	m_LastNetworkPumpTime = 0;
 }
 
 void CClient::Disconnect()
@@ -1091,8 +1092,26 @@ void CClient::RenderGraphs()
 	const float GraphSpacing = std::round(Graphics()->ScreenWidth() / 100.0f);
 	const float GraphX = Graphics()->ScreenWidth() - GraphW - GraphSpacing;
 
-	TextRender()->TextColor(TextRender()->DefaultTextColor());
-	TextRender()->Text(GraphX, GraphSpacing * 5 - 12.0f - 10.0f, 12.0f, Localize("Press Ctrl+Shift+G to disable debug graphs."));
+	const float HintX = GraphX;
+	const float HintY = GraphSpacing * 5 - 12.0f - 10.0f;
+	if(!m_DbgGraphsHintTextContainer.Valid() || HintX != m_DbgGraphsHintLastX || HintY != m_DbgGraphsHintLastY)
+	{
+		m_DbgGraphsHintLastX = HintX;
+		m_DbgGraphsHintLastY = HintY;
+		CTextCursor Cursor;
+		Cursor.m_FontSize = 12.0f;
+		Cursor.m_X = HintX;
+		Cursor.m_Y = HintY;
+		const char *pHint = Localize("Press Ctrl+Shift+G to disable debug graphs.");
+		if(m_DbgGraphsHintTextContainer.Valid())
+			TextRender()->RecreateTextContainerSoft(m_DbgGraphsHintTextContainer, &Cursor, pHint);
+		else
+			TextRender()->CreateTextContainer(m_DbgGraphsHintTextContainer, &Cursor, pHint);
+	}
+	if(m_DbgGraphsHintTextContainer.Valid())
+	{
+		TextRender()->RenderTextContainer(m_DbgGraphsHintTextContainer, TextRender()->DefaultTextColor(), TextRender()->DefaultTextOutlineColor());
+	}
 
 	m_FpsGraph.Scale(time_freq());
 	m_FpsGraph.Render(Graphics(), TextRender(), GraphX, GraphSpacing * 5, GraphW, GraphH, "FPS");
@@ -2670,13 +2689,25 @@ int CClient::ConnectNetTypes() const
 
 void CClient::PumpNetwork()
 {
+	if(State() == IClient::STATE_DEMOPLAYBACK)
+	{
+		const int64_t Now = time_get();
+		if(m_LastNetworkPumpTime != 0 && (Now - m_LastNetworkPumpTime) < (time_freq() / 100))
+		{
+			return;
+		}
+		m_LastNetworkPumpTime = Now;
+	}
+
 #if defined(CONF_PLATFORM_IOS)
 	RecreateBrokenSockets();
 #endif
 
-	for(auto &NetClient : m_aNetClient)
+	for(int Conn = 0; Conn < NUM_CONNS; Conn++)
 	{
-		NetClient.Update();
+		if(Conn == CONN_DUMMY && !DummyConnecting() && !DummyConnected())
+			continue;
+		m_aNetClient[Conn].Update();
 	}
 
 	if(State() != IClient::STATE_DEMOPLAYBACK)
@@ -2734,6 +2765,8 @@ void CClient::PumpNetwork()
 	SECURITY_TOKEN ResponseToken;
 	for(int Conn = 0; Conn < NUM_CONNS; Conn++)
 	{
+		if(Conn == CONN_DUMMY && !DummyConnecting() && !DummyConnected())
+			continue;
 		while(m_aNetClient[Conn].Recv(&Packet, &ResponseToken, IsSixup()))
 		{
 			if(Packet.m_ClientId == -1)
@@ -2876,10 +2909,11 @@ void CClient::Update()
 			GameClient()->OnDummySwap();
 		}
 
+		const int64_t NowTime = time_get();
 		if(m_aapSnapshots[!g_Config.m_ClDummy][SNAP_CURRENT])
 		{
 			// switch dummy snapshot
-			int64_t Now = m_aGameTime[!g_Config.m_ClDummy].Get(time_get());
+			int64_t Now = m_aGameTime[!g_Config.m_ClDummy].Get(NowTime);
 			while(true)
 			{
 				if(!m_aapSnapshots[!g_Config.m_ClDummy][SNAP_CURRENT]->m_pNext)
@@ -2901,8 +2935,8 @@ void CClient::Update()
 		{
 			// switch snapshot
 			bool Repredict = false;
-			int64_t Now = m_aGameTime[g_Config.m_ClDummy].Get(time_get());
-			int64_t PredNow = m_PredictedTime.Get(time_get());
+			int64_t Now = m_aGameTime[g_Config.m_ClDummy].Get(NowTime);
+			int64_t PredNow = m_PredictedTime.Get(NowTime);
 
 			if(m_LastDummy != (bool)g_Config.m_ClDummy && m_aapSnapshots[g_Config.m_ClDummy][SNAP_PREV])
 			{
@@ -3107,7 +3141,13 @@ void CClient::Update()
 	}
 
 	// update the server browser
-	m_ServerBrowser.Update();
+	const int64_t NowBrowser = time_get();
+	const int64_t ServerBrowserInterval = (State() == STATE_ONLINE) ? (time_freq() / 25) : (time_freq() / 60);
+	if((NowBrowser - m_LastServerBrowserUpdateTime) >= ServerBrowserInterval)
+	{
+		m_ServerBrowser.Update();
+		m_LastServerBrowserUpdateTime = NowBrowser;
+	}
 
 	Discord()->Update();
 	Steam()->Update();
@@ -3503,7 +3543,12 @@ void CClient::Run()
 		AutoStatScreenshot_Cleanup();
 		AutoCSV_Cleanup();
 
-		m_Fifo.Update();
+		const int64_t NowFifo = time_get();
+		if((NowFifo - m_LastFifoUpdateTime) >= (time_freq() / 100))
+		{
+			m_Fifo.Update();
+			m_LastFifoUpdateTime = NowFifo;
+		}
 
 		if(State() == IClient::STATE_QUITTING || State() == IClient::STATE_RESTARTING)
 			break;
@@ -3555,6 +3600,15 @@ void CClient::Run()
 	// close sockets
 	for(unsigned int i = 0; i < std::size(m_aNetClient); i++)
 		m_aNetClient[i].Close();
+
+	// drop graph cached text containers
+	m_FpsGraph.DropTextContainers(m_pTextRender);
+	for(size_t i = 0; i < NUM_DUMMIES; ++i)
+	{
+		m_aInputtimeMarginGraphs[i].DropTextContainers(m_pTextRender);
+		m_aGametimeMarginGraphs[i].DropTextContainers(m_pTextRender);
+	}
+	m_pTextRender->DeleteTextContainer(m_DbgGraphsHintTextContainer);
 
 	// shutdown text render while graphics are still available
 	m_pTextRender->Shutdown();
@@ -5417,8 +5471,9 @@ int CClient::GetPredictionTick()
 
 void CClient::GetSmoothTick(int *pSmoothTick, float *pSmoothIntraTick, float MixAmount)
 {
-	int64_t GameTime = m_aGameTime[g_Config.m_ClDummy].Get(time_get());
-	int64_t PredTime = m_PredictedTime.Get(time_get());
+	const int64_t Now = time_get();
+	int64_t GameTime = m_aGameTime[g_Config.m_ClDummy].Get(Now);
+	int64_t PredTime = m_PredictedTime.Get(Now);
 	int64_t SmoothTime = std::clamp(GameTime + (int64_t)(MixAmount * (PredTime - GameTime)), GameTime, PredTime);
 
 	*pSmoothTick = (int)(SmoothTime * GameTickSpeed() / time_freq()) + 1;

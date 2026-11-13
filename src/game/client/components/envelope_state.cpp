@@ -61,6 +61,18 @@ void CEnvelopeState::EnvelopeEval(int TimeOffsetMillis, int EnvelopeIndex, Color
 	{
 		return;
 	}
+
+	const size_t Slot = (static_cast<size_t>(EnvelopeIndex) ^ (static_cast<size_t>(TimeOffsetMillis) >> 4)) % m_aEvalCache.size();
+	const CCachedEval &Cached = m_aEvalCache[Slot];
+	if(Cached.m_EnvelopeIndex == EnvelopeIndex &&
+		Cached.m_TimeOffsetMillis == TimeOffsetMillis &&
+		Cached.m_Channels == Channels &&
+		Cached.m_EvalTime == m_CachedTime)
+	{
+		Result = Cached.m_Result;
+		return;
+	}
+
 	const std::vector<const CMapItemEnvelope *> &vpEnvelopes = m_pEnvelopePoints->Envelopes();
 	if(EnvelopeIndex >= (int)vpEnvelopes.size())
 	{
@@ -81,4 +93,6 @@ void CEnvelopeState::EnvelopeEval(int TimeOffsetMillis, int EnvelopeIndex, Color
 	}
 
 	CRenderMap::RenderEvalEnvelope(m_pEnvelopePoints.get(), m_CachedTime + std::chrono::milliseconds(TimeOffsetMillis), Result, Channels);
+
+	m_aEvalCache[Slot] = {EnvelopeIndex, TimeOffsetMillis, Channels, m_CachedTime, Result};
 }

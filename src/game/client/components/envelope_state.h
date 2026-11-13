@@ -5,6 +5,7 @@
 #include <game/map/render_interfaces.h>
 #include <game/map/render_map.h>
 
+#include <array>
 #include <chrono>
 #include <memory>
 
@@ -21,6 +22,17 @@ public:
 	int Sizeof() const override { return sizeof(*this); }
 
 private:
+	class CCachedEval
+	{
+	public:
+		int m_EnvelopeIndex = -1;
+		int m_TimeOffsetMillis = 0;
+		size_t m_Channels = 0;
+		std::chrono::nanoseconds m_EvalTime{-1};
+		ColorRGBA m_Result;
+	};
+	mutable std::array<CCachedEval, 32> m_aEvalCache{};
+
 	std::shared_ptr<CMapBasedEnvelopePointAccess> m_pEnvelopePoints;
 	bool m_OnlineOnly;
 	std::chrono::nanoseconds m_CachedTime;

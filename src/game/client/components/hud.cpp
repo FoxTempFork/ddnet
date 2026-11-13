@@ -30,9 +30,20 @@
 CHud::CHud()
 {
 	m_FPSTextContainerIndex.Reset();
+	m_ShowPredTextContainerIndex.Reset();
 	m_DDRaceEffectsTextContainerIndex.Reset();
+	m_ServerRecordLabelContainerIndex.Reset();
+	m_ServerRecordTextContainerIndex.Reset();
+	m_PlayerRecordLabelContainerIndex.Reset();
+	m_PlayerRecordTextContainerIndex.Reset();
 	m_PlayerAngleTextContainerIndex.Reset();
 	m_PlayerPrevAngle = -INFINITY;
+	m_MovementLabelsContainerIndex.Reset();
+	m_MovementLabelsValid = false;
+	m_LocalTimeTextContainerIndex.Reset();
+	m_aCachedLocalTimeStr[0] = '\0';
+	m_SpectatorCountTextContainerIndex.Reset();
+	m_PrevSpectatorCount = -1;
 
 	for(int i = 0; i < 2; i++)
 	{
@@ -56,7 +67,71 @@ void CHud::ResetHudContainers()
 	}
 
 	TextRender()->DeleteTextContainer(m_FPSTextContainerIndex);
+	m_PrevFps = -1;
+	m_PrevFpsWidth = -1.0f;
+	m_LastFpsUpdate = 0;
+
+	TextRender()->DeleteTextContainer(m_ShowPredTextContainerIndex);
+	m_PrevPredTime = -1;
+	m_PrevPredWidth = -1.0f;
+	m_PrevPredShowfps = -1;
+	m_LastPredUpdate = 0;
+
 	TextRender()->DeleteTextContainer(m_DDRaceEffectsTextContainerIndex);
+	m_PrevFinishTimeDDRaceTime = 0;
+	m_PrevFinishTimeDiff = 0.0f;
+	m_PrevTimeCpDiff = 0.0f;
+
+	TextRender()->DeleteTextContainer(m_ServerRecordLabelContainerIndex);
+	TextRender()->DeleteTextContainer(m_ServerRecordTextContainerIndex);
+	m_PrevServerBestTimeSeconds = FinishTime::UNSET;
+	m_PrevServerBestTimeMillis = FinishTime::UNSET;
+
+	TextRender()->DeleteTextContainer(m_PlayerRecordLabelContainerIndex);
+	TextRender()->DeleteTextContainer(m_PlayerRecordTextContainerIndex);
+	m_PrevPlayerFinishTimeSeconds = FinishTime::UNSET;
+	m_PrevPlayerFinishTimeMillis = FinishTime::UNSET;
+	m_PrevPlayerRecord = -1.0f;
+
+	TextRender()->DeleteTextContainer(m_MovementLabelsContainerIndex);
+	m_MovementLabelsValid = false;
+	m_LastMovementUpdate = 0;
+
+	TextRender()->DeleteTextContainer(m_LocalTimeTextContainerIndex);
+	m_aCachedLocalTimeStr[0] = '\0';
+
+	TextRender()->DeleteTextContainer(m_SpectatorCountTextContainerIndex);
+	m_PrevSpectatorCount = -1;
+
+	TextRender()->DeleteTextContainer(m_GameTimerContainerIndex);
+	m_PrevGameTimerTime = -1;
+	m_PrevGameTimerHalf = -1.0f;
+	m_PrevGameTimerW = -1.0f;
+
+	TextRender()->DeleteTextContainer(m_SpectatorHudContainerIndex);
+	m_aCachedSpectatorText[0] = '\0';
+	m_CachedSpectatorTextX = -1.0f;
+	m_CachedSpectatorTextY = -1.0f;
+
+	TextRender()->DeleteTextContainer(m_SpectatorAutoCameraContainerIndex);
+	TextRender()->DeleteTextContainer(m_SpectatorAutoCameraIconContainerIndex);
+	m_CachedAutoCameraTextWidth = -1.0f;
+	m_CachedAutoCameraIconX = -1.0f;
+	m_CachedAutoCameraTagY = -1.0f;
+
+	TextRender()->DeleteTextContainer(m_WarmupTitleContainerIndex);
+	TextRender()->DeleteTextContainer(m_WarmupTimeContainerIndex);
+	m_PrevWarmupSeconds = -1;
+	m_PrevWarmupTenths = -1;
+	m_PrevWarmupTitleCenterX = -1.0f;
+	m_PrevWarmupTimeCenterX = -1.0f;
+
+	TextRender()->DeleteTextContainer(m_PauseNotificationContainerIndex);
+	m_PrevPauseNotificationHalf = -1.0f;
+
+	TextRender()->DeleteTextContainer(m_SuddenDeathContainerIndex);
+	m_PrevSuddenDeathCenterX = -1.0f;
+
 	TextRender()->DeleteTextContainer(m_PlayerAngleTextContainerIndex);
 	m_PlayerPrevAngle = -INFINITY;
 	for(int i = 0; i < 2; i++)
@@ -142,22 +217,48 @@ void CHud::RenderGameTimer()
 			Time = (Client()->GameTick(g_Config.m_ClDummy) - GameClient()->m_Snap.m_pGameInfoObj->m_RoundStartTick) / Client()->GameTickSpeed();
 		}
 
-		str_time((int64_t)Time * 100, ETimeFormat::DAYS, aBuf, sizeof(aBuf));
-		float FontSize = 10.0f;
+		const float FontSize = 10.0f;
 		static float s_TextWidthM = TextRender()->TextWidth(FontSize, "00:00", -1, -1.0f);
 		static float s_TextWidthH = TextRender()->TextWidth(FontSize, "00:00:00", -1, -1.0f);
 		static float s_TextWidth0D = TextRender()->TextWidth(FontSize, "0d 00:00:00", -1, -1.0f);
 		static float s_TextWidth00D = TextRender()->TextWidth(FontSize, "00d 00:00:00", -1, -1.0f);
 		static float s_TextWidth000D = TextRender()->TextWidth(FontSize, "000d 00:00:00", -1, -1.0f);
 		float w = Time >= 3600 * 24 * 100 ? s_TextWidth000D : (Time >= 3600 * 24 * 10 ? s_TextWidth00D : (Time >= 3600 * 24 ? s_TextWidth0D : (Time >= 3600 ? s_TextWidthH : s_TextWidthM)));
+
+		if(!m_GameTimerContainerIndex.Valid() || Time != m_PrevGameTimerTime || Half != m_PrevGameTimerHalf || w != m_PrevGameTimerW)
+		{
+			m_PrevGameTimerTime = Time;
+			m_PrevGameTimerHalf = Half;
+			m_PrevGameTimerW = w;
+			str_time((int64_t)Time * 100, ETimeFormat::DAYS, aBuf, sizeof(aBuf));
+
+			CTextCursor Cursor;
+			Cursor.m_FontSize = FontSize;
+			Cursor.m_X = Half - w / 2;
+			Cursor.m_Y = 2;
+			if(m_GameTimerContainerIndex.Valid())
+				TextRender()->RecreateTextContainerSoft(m_GameTimerContainerIndex, &Cursor, aBuf);
+			else
+				TextRender()->CreateTextContainer(m_GameTimerContainerIndex, &Cursor, aBuf);
+		}
+
+		ColorRGBA Color(1.0f, 1.0f, 1.0f, 1.0f);
 		// last 60 sec red, last 10 sec blink
 		if(GameClient()->m_Snap.m_pGameInfoObj->m_TimeLimit && Time <= 60 && (GameClient()->m_Snap.m_pGameInfoObj->m_WarmupTimer <= 0))
 		{
-			float Alpha = Time <= 10 && (2 * time() / time_freq()) % 2 ? 0.5f : 1.0f;
-			TextRender()->TextColor(1.0f, 0.25f, 0.25f, Alpha);
+			float Alpha = Time <= 10 && (2 * time_get() / time_freq()) % 2 ? 0.5f : 1.0f;
+			Color = ColorRGBA(1.0f, 0.25f, 0.25f, Alpha);
 		}
-		TextRender()->Text(Half - w / 2, 2, FontSize, aBuf, -1.0f);
-		TextRender()->TextColor(1.0f, 1.0f, 1.0f, 1.0f);
+
+		if(m_GameTimerContainerIndex.Valid())
+		{
+			TextRender()->RenderTextContainer(m_GameTimerContainerIndex, Color, TextRender()->DefaultTextOutlineColor());
+		}
+	}
+	else
+	{
+		TextRender()->DeleteTextContainer(m_GameTimerContainerIndex);
+		m_PrevGameTimerTime = -1;
 	}
 }
 
@@ -167,9 +268,31 @@ void CHud::RenderPauseNotification()
 		!(GameClient()->m_Snap.m_pGameInfoObj->m_GameStateFlags & GAMESTATEFLAG_GAMEOVER))
 	{
 		const char *pText = Localize("Game paused");
-		float FontSize = 20.0f;
-		float w = TextRender()->TextWidth(FontSize, pText, -1, -1.0f);
-		TextRender()->Text(150.0f * Graphics()->ScreenAspect() + -w / 2.0f, 50.0f, FontSize, pText, -1.0f);
+		const float FontSize = 20.0f;
+		const float CenterX = 150.0f * Graphics()->ScreenAspect();
+
+		if(!m_PauseNotificationContainerIndex.Valid() || CenterX != m_PrevPauseNotificationHalf)
+		{
+			m_PrevPauseNotificationHalf = CenterX;
+			const float w = TextRender()->TextWidth(FontSize, pText, -1, -1.0f);
+			CTextCursor Cursor;
+			Cursor.m_FontSize = FontSize;
+			Cursor.m_X = CenterX - w / 2.0f;
+			Cursor.m_Y = 50.0f;
+			if(m_PauseNotificationContainerIndex.Valid())
+				TextRender()->RecreateTextContainerSoft(m_PauseNotificationContainerIndex, &Cursor, pText);
+			else
+				TextRender()->CreateTextContainer(m_PauseNotificationContainerIndex, &Cursor, pText);
+		}
+		if(m_PauseNotificationContainerIndex.Valid())
+		{
+			TextRender()->RenderTextContainer(m_PauseNotificationContainerIndex, TextRender()->DefaultTextColor(), TextRender()->DefaultTextOutlineColor());
+		}
+	}
+	else
+	{
+		TextRender()->DeleteTextContainer(m_PauseNotificationContainerIndex);
+		m_PrevPauseNotificationHalf = -1.0f;
 	}
 }
 
@@ -177,11 +300,32 @@ void CHud::RenderSuddenDeath()
 {
 	if(GameClient()->m_Snap.m_pGameInfoObj->m_GameStateFlags & GAMESTATEFLAG_SUDDENDEATH)
 	{
-		float Half = m_Width / 2.0f;
+		const float Half = m_Width / 2.0f;
 		const char *pText = Localize("Sudden Death");
-		float FontSize = 12.0f;
-		float w = TextRender()->TextWidth(FontSize, pText, -1, -1.0f);
-		TextRender()->Text(Half - w / 2, 2, FontSize, pText, -1.0f);
+		const float FontSize = 12.0f;
+
+		if(!m_SuddenDeathContainerIndex.Valid() || Half != m_PrevSuddenDeathCenterX)
+		{
+			m_PrevSuddenDeathCenterX = Half;
+			const float w = TextRender()->TextWidth(FontSize, pText, -1, -1.0f);
+			CTextCursor Cursor;
+			Cursor.m_FontSize = FontSize;
+			Cursor.m_X = Half - w / 2.0f;
+			Cursor.m_Y = 2.0f;
+			if(m_SuddenDeathContainerIndex.Valid())
+				TextRender()->RecreateTextContainerSoft(m_SuddenDeathContainerIndex, &Cursor, pText);
+			else
+				TextRender()->CreateTextContainer(m_SuddenDeathContainerIndex, &Cursor, pText);
+		}
+		if(m_SuddenDeathContainerIndex.Valid())
+		{
+			TextRender()->RenderTextContainer(m_SuddenDeathContainerIndex, TextRender()->DefaultTextColor(), TextRender()->DefaultTextOutlineColor());
+		}
+	}
+	else
+	{
+		TextRender()->DeleteTextContainer(m_SuddenDeathContainerIndex);
+		m_PrevSuddenDeathCenterX = -1.0f;
 	}
 }
 
@@ -510,27 +654,69 @@ void CHud::RenderWarmupTimer()
 	if(GameClient()->m_Snap.m_pGameInfoObj->m_WarmupTimer <= 0 ||
 		(GameClient()->m_Snap.m_pGameInfoObj->m_GameStateFlags & GAMESTATEFLAG_RACETIME) != 0)
 	{
+		TextRender()->DeleteTextContainer(m_WarmupTitleContainerIndex);
+		TextRender()->DeleteTextContainer(m_WarmupTimeContainerIndex);
+		m_PrevWarmupSeconds = -1;
+		m_PrevWarmupTenths = -1;
+		m_PrevWarmupTitleCenterX = -1.0f;
+		m_PrevWarmupTimeCenterX = -1.0f;
 		return;
 	}
 
 	const float FontSize = 20.0f;
 	const char *pTitle = Localize("Warmup");
-	TextRender()->Text(150.0f * Graphics()->ScreenAspect() - TextRender()->TextWidth(FontSize, pTitle) / 2.0f, 50.0f, FontSize, pTitle);
+	const float Aspect = Graphics()->ScreenAspect();
+	const float CenterX = 150.0f * Aspect;
+
+	if(!m_WarmupTitleContainerIndex.Valid() || CenterX != m_PrevWarmupTitleCenterX)
+	{
+		m_PrevWarmupTitleCenterX = CenterX;
+		const float TitleWidth = TextRender()->TextWidth(FontSize, pTitle);
+		CTextCursor Cursor;
+		Cursor.m_FontSize = FontSize;
+		Cursor.m_X = CenterX - TitleWidth / 2.0f;
+		Cursor.m_Y = 50.0f;
+		if(m_WarmupTitleContainerIndex.Valid())
+			TextRender()->RecreateTextContainerSoft(m_WarmupTitleContainerIndex, &Cursor, pTitle);
+		else
+			TextRender()->CreateTextContainer(m_WarmupTitleContainerIndex, &Cursor, pTitle);
+	}
+	if(m_WarmupTitleContainerIndex.Valid())
+		TextRender()->RenderTextContainer(m_WarmupTitleContainerIndex, TextRender()->DefaultTextColor(), TextRender()->DefaultTextOutlineColor());
 
 	const int Seconds = GameClient()->m_Snap.m_pGameInfoObj->m_WarmupTimer / Client()->GameTickSpeed();
-	char aWarmupTime[16];
-	float TextWidth;
-	if(Seconds < 5)
+	const int Tenths = Seconds < 5 ? ((GameClient()->m_Snap.m_pGameInfoObj->m_WarmupTimer * 10 / Client()->GameTickSpeed()) % 10) : 0;
+
+	if(!m_WarmupTimeContainerIndex.Valid() || Seconds != m_PrevWarmupSeconds || (Seconds < 5 && Tenths != m_PrevWarmupTenths) || CenterX != m_PrevWarmupTimeCenterX)
 	{
-		str_format(aWarmupTime, sizeof(aWarmupTime), "%d.%d", Seconds, (GameClient()->m_Snap.m_pGameInfoObj->m_WarmupTimer * 10 / Client()->GameTickSpeed()) % 10);
-		TextWidth = TextRender()->TextWidth(FontSize, "0.0"); // Calculate width with fixed string to avoid slight changes when using aWarmupTime
+		m_PrevWarmupSeconds = Seconds;
+		m_PrevWarmupTenths = Tenths;
+		m_PrevWarmupTimeCenterX = CenterX;
+
+		char aWarmupTime[16];
+		float TextWidth;
+		if(Seconds < 5)
+		{
+			str_format(aWarmupTime, sizeof(aWarmupTime), "%d.%d", Seconds, Tenths);
+			TextWidth = TextRender()->TextWidth(FontSize, "0.0");
+		}
+		else
+		{
+			str_format(aWarmupTime, sizeof(aWarmupTime), "%d", Seconds);
+			TextWidth = TextRender()->TextWidth(FontSize, aWarmupTime);
+		}
+
+		CTextCursor Cursor;
+		Cursor.m_FontSize = FontSize;
+		Cursor.m_X = CenterX - TextWidth / 2.0f;
+		Cursor.m_Y = 75.0f;
+		if(m_WarmupTimeContainerIndex.Valid())
+			TextRender()->RecreateTextContainerSoft(m_WarmupTimeContainerIndex, &Cursor, aWarmupTime);
+		else
+			TextRender()->CreateTextContainer(m_WarmupTimeContainerIndex, &Cursor, aWarmupTime);
 	}
-	else
-	{
-		str_format(aWarmupTime, sizeof(aWarmupTime), "%d", Seconds);
-		TextWidth = TextRender()->TextWidth(FontSize, aWarmupTime);
-	}
-	TextRender()->Text(150.0f * Graphics()->ScreenAspect() - TextWidth / 2.0f, 75.0f, FontSize, aWarmupTime);
+	if(m_WarmupTimeContainerIndex.Valid())
+		TextRender()->RenderTextContainer(m_WarmupTimeContainerIndex, TextRender()->DefaultTextColor(), TextRender()->DefaultTextOutlineColor());
 }
 
 void CHud::RenderTextInfo()
@@ -542,39 +728,72 @@ void CHud::RenderTextInfo()
 #endif
 	if(Showfps)
 	{
-		char aBuf[16];
-		const int FramesPerSecond = round_to_int(1.0f / Client()->FrameTimeAverage());
-		str_format(aBuf, sizeof(aBuf), "%d", FramesPerSecond);
+		const float FrameTimeAvg = Client()->FrameTimeAverage();
+		const int FramesPerSecond = FrameTimeAvg > 0.0f ? round_to_int(1.0f / FrameTimeAvg) : 0;
+		const int64_t Now = time_get();
 
-		static float s_TextWidth0 = TextRender()->TextWidth(12.f, "0", -1, -1.0f);
-		static float s_TextWidth00 = TextRender()->TextWidth(12.f, "00", -1, -1.0f);
-		static float s_TextWidth000 = TextRender()->TextWidth(12.f, "000", -1, -1.0f);
-		static float s_TextWidth0000 = TextRender()->TextWidth(12.f, "0000", -1, -1.0f);
-		static float s_TextWidth00000 = TextRender()->TextWidth(12.f, "00000", -1, -1.0f);
-		static const float s_aTextWidth[5] = {s_TextWidth0, s_TextWidth00, s_TextWidth000, s_TextWidth0000, s_TextWidth00000};
+		if(!m_FPSTextContainerIndex.Valid() || m_Width != m_PrevFpsWidth || (FramesPerSecond != m_PrevFps && (Now - m_LastFpsUpdate >= time_freq() / 25)))
+		{
+			m_PrevFps = FramesPerSecond;
+			m_PrevFpsWidth = m_Width;
+			m_LastFpsUpdate = Now;
 
-		int DigitIndex = GetDigitsIndex(FramesPerSecond, 4);
+			char aBuf[16];
+			str_format(aBuf, sizeof(aBuf), "%d", FramesPerSecond);
 
-		CTextCursor Cursor;
-		Cursor.SetPosition(vec2(m_Width - 10 - s_aTextWidth[DigitIndex], 5));
-		Cursor.m_FontSize = 12.0f;
-		auto OldFlags = TextRender()->GetRenderFlags();
-		TextRender()->SetRenderFlags(OldFlags | TEXT_RENDER_FLAG_ONE_TIME_USE);
-		if(m_FPSTextContainerIndex.Valid())
-			TextRender()->RecreateTextContainerSoft(m_FPSTextContainerIndex, &Cursor, aBuf);
-		else
-			TextRender()->CreateTextContainer(m_FPSTextContainerIndex, &Cursor, "0");
-		TextRender()->SetRenderFlags(OldFlags);
+			static float s_TextWidth0 = TextRender()->TextWidth(12.f, "0", -1, -1.0f);
+			static float s_TextWidth00 = TextRender()->TextWidth(12.f, "00", -1, -1.0f);
+			static float s_TextWidth000 = TextRender()->TextWidth(12.f, "000", -1, -1.0f);
+			static float s_TextWidth0000 = TextRender()->TextWidth(12.f, "0000", -1, -1.0f);
+			static float s_TextWidth00000 = TextRender()->TextWidth(12.f, "00000", -1, -1.0f);
+			static const float s_aTextWidth[5] = {s_TextWidth0, s_TextWidth00, s_TextWidth000, s_TextWidth0000, s_TextWidth00000};
+
+			int DigitIndex = GetDigitsIndex(FramesPerSecond, 4);
+
+			CTextCursor Cursor;
+			Cursor.SetPosition(vec2(m_Width - 10 - s_aTextWidth[DigitIndex], 5));
+			Cursor.m_FontSize = 12.0f;
+			TextRender()->RecreateTextContainer(m_FPSTextContainerIndex, &Cursor, aBuf);
+		}
 		if(m_FPSTextContainerIndex.Valid())
 		{
 			TextRender()->RenderTextContainer(m_FPSTextContainerIndex, TextRender()->DefaultTextColor(), TextRender()->DefaultTextOutlineColor());
 		}
 	}
+	else if(m_FPSTextContainerIndex.Valid())
+	{
+		TextRender()->DeleteTextContainer(m_FPSTextContainerIndex);
+		m_PrevFps = -1;
+	}
 	if(g_Config.m_ClShowpred && Client()->State() != IClient::STATE_DEMOPLAYBACK)
 	{
-		char aBuf[64];
-		str_format(aBuf, sizeof(aBuf), "%d", Client()->GetPredictionTime());
-		TextRender()->Text(m_Width - 10 - TextRender()->TextWidth(12, aBuf, -1, -1.0f), Showfps ? 20 : 5, 12, aBuf, -1.0f);
+		const int PredTime = Client()->GetPredictionTime();
+		const int64_t Now = time_get();
+		if(!m_ShowPredTextContainerIndex.Valid() || m_Width != m_PrevPredWidth || Showfps != m_PrevPredShowfps || (PredTime != m_PrevPredTime && (Now - m_LastPredUpdate >= time_freq() / 25)))
+		{
+			m_PrevPredTime = PredTime;
+			m_PrevPredWidth = m_Width;
+			m_PrevPredShowfps = Showfps;
+			m_LastPredUpdate = Now;
+
+			char aBuf[64];
+			str_format(aBuf, sizeof(aBuf), "%d", PredTime);
+
+			CTextCursor Cursor;
+			Cursor.m_FontSize = 12.0f;
+			Cursor.m_X = m_Width - 10.0f - TextRender()->TextWidth(12.0f, aBuf, -1, -1.0f);
+			Cursor.m_Y = Showfps ? 20.0f : 5.0f;
+			TextRender()->RecreateTextContainer(m_ShowPredTextContainerIndex, &Cursor, aBuf);
+		}
+		if(m_ShowPredTextContainerIndex.Valid())
+		{
+			TextRender()->RenderTextContainer(m_ShowPredTextContainerIndex, TextRender()->DefaultTextColor(), TextRender()->DefaultTextOutlineColor());
+		}
+	}
+	else if(m_ShowPredTextContainerIndex.Valid())
+	{
+		TextRender()->DeleteTextContainer(m_ShowPredTextContainerIndex);
+		m_PrevPredTime = -1;
 	}
 }
 
@@ -1320,10 +1539,26 @@ void CHud::RenderSpectatorCount()
 	float y = StartY + BoxHeight / 3;
 	float x = StartX + 2;
 
-	TextRender()->SetFontPreset(EFontPreset::ICON_FONT);
-	TextRender()->Text(x, y, Fontsize, FontIcon::EYE, -1.0f);
-	TextRender()->SetFontPreset(EFontPreset::DEFAULT_FONT);
-	TextRender()->Text(x + Fontsize + 3.f, y, Fontsize, aBuf, -1.0f);
+	if(!m_SpectatorCountTextContainerIndex.Valid() || m_PrevSpectatorCount != Count)
+	{
+		m_PrevSpectatorCount = Count;
+		TextRender()->DeleteTextContainer(m_SpectatorCountTextContainerIndex);
+
+		CTextCursor Cursor;
+		Cursor.SetPosition(vec2(x, y));
+		Cursor.m_FontSize = Fontsize;
+		TextRender()->SetFontPreset(EFontPreset::ICON_FONT);
+		TextRender()->CreateOrAppendTextContainer(m_SpectatorCountTextContainerIndex, &Cursor, FontIcon::EYE);
+		TextRender()->SetFontPreset(EFontPreset::DEFAULT_FONT);
+		Cursor.SetPosition(vec2(x + Fontsize + 3.f, y));
+		Cursor.m_FontSize = Fontsize;
+		TextRender()->AppendTextContainer(m_SpectatorCountTextContainerIndex, &Cursor, aBuf);
+	}
+
+	if(m_SpectatorCountTextContainerIndex.Valid())
+	{
+		TextRender()->RenderTextContainer(m_SpectatorCountTextContainerIndex, TextRender()->DefaultTextColor(), TextRender()->DefaultTextOutlineColor());
+	}
 }
 
 void CHud::RenderDummyActions()
@@ -1400,10 +1635,10 @@ inline float CHud::GetMovementInformationBoxHeight()
 	return BoxHeight;
 }
 
-void CHud::UpdateMovementInformationTextContainer(STextContainerIndex &TextContainer, float FontSize, float Value, float &PrevValue)
+void CHud::UpdateMovementInformationTextContainer(STextContainerIndex &TextContainer, float FontSize, float Value, float &PrevValue, bool UpdateNeeded)
 {
 	Value = std::round(Value * 100.0f) / 100.0f; // Round to 2dp
-	if(TextContainer.Valid() && PrevValue == Value)
+	if(TextContainer.Valid() && (!UpdateNeeded || PrevValue == Value))
 		return;
 	PrevValue = Value;
 
@@ -1505,18 +1740,74 @@ void CHud::RenderMovementInformation()
 	const float LeftX = StartX + 2.0f;
 	const float RightX = m_Width - 2.0f;
 
+	if(!m_MovementLabelsContainerIndex.Valid() || !m_MovementLabelsValid)
+	{
+		TextRender()->DeleteTextContainer(m_MovementLabelsContainerIndex);
+		m_MovementLabelsValid = true;
+
+		float LabelY = StartY + LineSpacer * 2.0f;
+		CTextCursor Cursor;
+		Cursor.m_FontSize = Fontsize;
+
+		if(g_Config.m_ClShowhudPlayerPosition)
+		{
+			Cursor.SetPosition(vec2(LeftX, LabelY));
+			TextRender()->CreateOrAppendTextContainer(m_MovementLabelsContainerIndex, &Cursor, Localize("Position:"));
+			LabelY += MOVEMENT_INFORMATION_LINE_HEIGHT;
+
+			Cursor.SetPosition(vec2(LeftX, LabelY));
+			TextRender()->AppendTextContainer(m_MovementLabelsContainerIndex, &Cursor, "X:");
+			LabelY += MOVEMENT_INFORMATION_LINE_HEIGHT;
+
+			Cursor.SetPosition(vec2(LeftX, LabelY));
+			TextRender()->AppendTextContainer(m_MovementLabelsContainerIndex, &Cursor, "Y:");
+			LabelY += MOVEMENT_INFORMATION_LINE_HEIGHT;
+		}
+
+		if(!PosOnly)
+		{
+			if(g_Config.m_ClShowhudPlayerSpeed)
+			{
+				Cursor.SetPosition(vec2(LeftX, LabelY));
+				TextRender()->AppendTextContainer(m_MovementLabelsContainerIndex, &Cursor, Localize("Speed:"));
+				LabelY += MOVEMENT_INFORMATION_LINE_HEIGHT;
+
+				Cursor.SetPosition(vec2(LeftX, LabelY));
+				TextRender()->AppendTextContainer(m_MovementLabelsContainerIndex, &Cursor, "X:");
+				LabelY += MOVEMENT_INFORMATION_LINE_HEIGHT;
+
+				Cursor.SetPosition(vec2(LeftX, LabelY));
+				TextRender()->AppendTextContainer(m_MovementLabelsContainerIndex, &Cursor, "Y:");
+				LabelY += MOVEMENT_INFORMATION_LINE_HEIGHT;
+			}
+
+			if(g_Config.m_ClShowhudPlayerAngle)
+			{
+				Cursor.SetPosition(vec2(LeftX, LabelY));
+				TextRender()->AppendTextContainer(m_MovementLabelsContainerIndex, &Cursor, Localize("Angle:"));
+			}
+		}
+	}
+
+	if(m_MovementLabelsContainerIndex.Valid())
+	{
+		TextRender()->RenderTextContainer(m_MovementLabelsContainerIndex, TextRender()->DefaultTextColor(), TextRender()->DefaultTextOutlineColor());
+	}
+
+	const int64_t Now = time_get();
+	const bool UpdateNeeded = (Now - m_LastMovementUpdate) >= (time_freq() / 50);
+	if(UpdateNeeded)
+		m_LastMovementUpdate = Now;
+
 	if(g_Config.m_ClShowhudPlayerPosition)
 	{
-		TextRender()->Text(LeftX, y, Fontsize, Localize("Position:"), -1.0f);
 		y += MOVEMENT_INFORMATION_LINE_HEIGHT;
 
-		TextRender()->Text(LeftX, y, Fontsize, "X:", -1.0f);
-		UpdateMovementInformationTextContainer(m_aPlayerPositionContainers[0], Fontsize, Info.m_Pos.x, m_aPlayerPrevPosition[0]);
+		UpdateMovementInformationTextContainer(m_aPlayerPositionContainers[0], Fontsize, Info.m_Pos.x, m_aPlayerPrevPosition[0], UpdateNeeded);
 		RenderMovementInformationTextContainer(m_aPlayerPositionContainers[0], TextRender()->DefaultTextColor(), RightX, y);
 		y += MOVEMENT_INFORMATION_LINE_HEIGHT;
 
-		TextRender()->Text(LeftX, y, Fontsize, "Y:", -1.0f);
-		UpdateMovementInformationTextContainer(m_aPlayerPositionContainers[1], Fontsize, Info.m_Pos.y, m_aPlayerPrevPosition[1]);
+		UpdateMovementInformationTextContainer(m_aPlayerPositionContainers[1], Fontsize, Info.m_Pos.y, m_aPlayerPrevPosition[1], UpdateNeeded);
 		RenderMovementInformationTextContainer(m_aPlayerPositionContainers[1], TextRender()->DefaultTextColor(), RightX, y);
 		y += MOVEMENT_INFORMATION_LINE_HEIGHT;
 	}
@@ -1526,10 +1817,8 @@ void CHud::RenderMovementInformation()
 
 	if(g_Config.m_ClShowhudPlayerSpeed)
 	{
-		TextRender()->Text(LeftX, y, Fontsize, Localize("Speed:"), -1.0f);
 		y += MOVEMENT_INFORMATION_LINE_HEIGHT;
 
-		const char aaCoordinates[][4] = {"X:", "Y:"};
 		for(int i = 0; i < 2; i++)
 		{
 			ColorRGBA Color(1.0f, 1.0f, 1.0f, 1.0f);
@@ -1537,8 +1826,7 @@ void CHud::RenderMovementInformation()
 				Color = ColorRGBA(0.0f, 1.0f, 0.0f, 1.0f);
 			if(m_aLastPlayerSpeedChange[i] == ESpeedChange::DECREASE)
 				Color = ColorRGBA(1.0f, 0.5f, 0.5f, 1.0f);
-			TextRender()->Text(LeftX, y, Fontsize, aaCoordinates[i], -1.0f);
-			UpdateMovementInformationTextContainer(m_aPlayerSpeedTextContainers[i], Fontsize, i == 0 ? Info.m_Speed.x : Info.m_Speed.y, m_aPlayerPrevSpeed[i]);
+			UpdateMovementInformationTextContainer(m_aPlayerSpeedTextContainers[i], Fontsize, i == 0 ? Info.m_Speed.x : Info.m_Speed.y, m_aPlayerPrevSpeed[i], UpdateNeeded);
 			RenderMovementInformationTextContainer(m_aPlayerSpeedTextContainers[i], Color, RightX, y);
 			y += MOVEMENT_INFORMATION_LINE_HEIGHT;
 		}
@@ -1548,10 +1836,9 @@ void CHud::RenderMovementInformation()
 
 	if(g_Config.m_ClShowhudPlayerAngle)
 	{
-		TextRender()->Text(LeftX, y, Fontsize, Localize("Angle:"), -1.0f);
 		y += MOVEMENT_INFORMATION_LINE_HEIGHT;
 
-		UpdateMovementInformationTextContainer(m_PlayerAngleTextContainerIndex, Fontsize, Info.m_Angle, m_PlayerPrevAngle);
+		UpdateMovementInformationTextContainer(m_PlayerAngleTextContainerIndex, Fontsize, Info.m_Angle, m_PlayerPrevAngle, UpdateNeeded);
 		RenderMovementInformationTextContainer(m_PlayerAngleTextContainerIndex, TextRender()->DefaultTextColor(), RightX, y);
 	}
 }
@@ -1582,14 +1869,37 @@ void CHud::RenderSpectatorHud()
 	{
 		str_copy(aBuf, Localize("Free-View"));
 	}
-	TextRender()->Text(m_Width - 174.0f, m_Height - 15.0f + (15.f - 8.f) / 2.f, 8.0f, aBuf, -1.0f);
+
+	const float TextX = m_Width - 174.0f;
+	const float TextY = m_Height - 15.0f + (15.f - 8.f) / 2.f;
+	if(!m_SpectatorHudContainerIndex.Valid() || str_comp(aBuf, m_aCachedSpectatorText) != 0 || TextX != m_CachedSpectatorTextX || TextY != m_CachedSpectatorTextY)
+	{
+		str_copy(m_aCachedSpectatorText, aBuf);
+		m_CachedSpectatorTextX = TextX;
+		m_CachedSpectatorTextY = TextY;
+
+		CTextCursor Cursor;
+		Cursor.m_FontSize = 8.0f;
+		Cursor.m_X = TextX;
+		Cursor.m_Y = TextY;
+		if(m_SpectatorHudContainerIndex.Valid())
+			TextRender()->RecreateTextContainerSoft(m_SpectatorHudContainerIndex, &Cursor, aBuf);
+		else
+			TextRender()->CreateTextContainer(m_SpectatorHudContainerIndex, &Cursor, aBuf);
+	}
+	if(m_SpectatorHudContainerIndex.Valid())
+	{
+		TextRender()->RenderTextContainer(m_SpectatorHudContainerIndex, TextRender()->DefaultTextColor(), TextRender()->DefaultTextOutlineColor());
+	}
 
 	// draw the camera info
 	if(Client()->State() != IClient::STATE_DEMOPLAYBACK && GameClient()->m_Camera.SpectatingPlayer() && GameClient()->m_Camera.CanUseAutoSpecCamera() && g_Config.m_ClSpecAutoSync)
 	{
 		bool AutoSpecCameraEnabled = GameClient()->m_Camera.m_AutoSpecCamera;
 		const char *pLabelText = Localize("AUTO", "Spectating Camera Mode Icon");
-		const float TextWidth = TextRender()->TextWidth(6.0f, pLabelText);
+		if(m_CachedAutoCameraTextWidth <= 0.0f)
+			m_CachedAutoCameraTextWidth = TextRender()->TextWidth(6.0f, pLabelText);
+		const float TextWidth = m_CachedAutoCameraTextWidth;
 
 		constexpr float RightMargin = 4.0f;
 		constexpr float IconWidth = 6.0f;
@@ -1597,12 +1907,40 @@ void CHud::RenderSpectatorHud()
 		const float TagWidth = IconWidth + TextWidth + Padding * 3.0f;
 		const float TagX = m_Width - RightMargin - TagWidth;
 		Graphics()->DrawRect(TagX, m_Height - 12.0f, TagWidth, 10.0f, ColorRGBA(1.0f, 1.0f, 1.0f, AutoSpecCameraEnabled ? 0.50f : 0.10f), IGraphics::CORNER_ALL, 2.5f);
-		TextRender()->TextColor(1, 1, 1, AutoSpecCameraEnabled ? 1.0f : 0.65f);
-		TextRender()->SetFontPreset(EFontPreset::ICON_FONT);
-		TextRender()->Text(TagX + Padding, m_Height - 10.0f, 6.0f, FontIcon::CAMERA, -1.0f);
-		TextRender()->SetFontPreset(EFontPreset::DEFAULT_FONT);
-		TextRender()->Text(TagX + Padding + IconWidth + Padding, m_Height - 10.0f, 6.0f, pLabelText, -1.0f);
-		TextRender()->TextColor(1, 1, 1, 1);
+
+		const float Alpha = AutoSpecCameraEnabled ? 1.0f : 0.65f;
+		const float IconX = TagX + Padding;
+		const float LabelX = TagX + Padding + IconWidth + Padding;
+		const float TagY = m_Height - 10.0f;
+
+		if(!m_SpectatorAutoCameraContainerIndex.Valid() || IconX != m_CachedAutoCameraIconX || TagY != m_CachedAutoCameraTagY)
+		{
+			m_CachedAutoCameraIconX = IconX;
+			m_CachedAutoCameraTagY = TagY;
+
+			CTextCursor Cursor;
+			Cursor.m_FontSize = 6.0f;
+			Cursor.m_X = IconX;
+			Cursor.m_Y = TagY;
+			TextRender()->SetFontPreset(EFontPreset::ICON_FONT);
+			if(m_SpectatorAutoCameraIconContainerIndex.Valid())
+				TextRender()->RecreateTextContainerSoft(m_SpectatorAutoCameraIconContainerIndex, &Cursor, FontIcon::CAMERA);
+			else
+				TextRender()->CreateTextContainer(m_SpectatorAutoCameraIconContainerIndex, &Cursor, FontIcon::CAMERA);
+			TextRender()->SetFontPreset(EFontPreset::DEFAULT_FONT);
+
+			Cursor.m_X = LabelX;
+			Cursor.m_Y = TagY;
+			if(m_SpectatorAutoCameraContainerIndex.Valid())
+				TextRender()->RecreateTextContainerSoft(m_SpectatorAutoCameraContainerIndex, &Cursor, pLabelText);
+			else
+				TextRender()->CreateTextContainer(m_SpectatorAutoCameraContainerIndex, &Cursor, pLabelText);
+		}
+
+		if(m_SpectatorAutoCameraIconContainerIndex.Valid())
+			TextRender()->RenderTextContainer(m_SpectatorAutoCameraIconContainerIndex, ColorRGBA(1.0f, 1.0f, 1.0f, Alpha), TextRender()->DefaultTextOutlineColor());
+		if(m_SpectatorAutoCameraContainerIndex.Valid())
+			TextRender()->RenderTextContainer(m_SpectatorAutoCameraContainerIndex, ColorRGBA(1.0f, 1.0f, 1.0f, Alpha), TextRender()->DefaultTextOutlineColor());
 	}
 }
 
@@ -1617,7 +1955,21 @@ void CHud::RenderLocalTime(float x)
 	// draw the text
 	char aTimeStr[6];
 	str_timestamp_format(aTimeStr, sizeof(aTimeStr), "%H:%M");
-	TextRender()->Text(x - 25.0f, (12.5f - 5.f) / 2.f, 5.0f, aTimeStr, -1.0f);
+	if(!m_LocalTimeTextContainerIndex.Valid() || str_comp(aTimeStr, m_aCachedLocalTimeStr) != 0)
+	{
+		str_copy(m_aCachedLocalTimeStr, aTimeStr);
+		CTextCursor Cursor;
+		Cursor.SetPosition(vec2(x - 25.0f, (12.5f - 5.f) / 2.f));
+		Cursor.m_FontSize = 5.0f;
+		if(m_LocalTimeTextContainerIndex.Valid())
+			TextRender()->RecreateTextContainerSoft(m_LocalTimeTextContainerIndex, &Cursor, aTimeStr);
+		else
+			TextRender()->CreateTextContainer(m_LocalTimeTextContainerIndex, &Cursor, aTimeStr);
+	}
+	if(m_LocalTimeTextContainerIndex.Valid())
+	{
+		TextRender()->RenderTextContainer(m_LocalTimeTextContainerIndex, TextRender()->DefaultTextColor(), TextRender()->DefaultTextOutlineColor());
+	}
 }
 
 void CHud::OnNewSnapshot()
@@ -1882,28 +2234,84 @@ void CHud::RenderRecord()
 {
 	if(GameClient()->m_MapBestTimeSeconds != FinishTime::UNSET && GameClient()->m_MapBestTimeSeconds != FinishTime::NOT_FINISHED_MILLIS)
 	{
-		char aBuf[64];
-		TextRender()->Text(5, 75, 6, Localize("Server best:"), -1.0f);
-		char aTime[32];
-		int64_t TimeCentiseconds = static_cast<int64_t>(GameClient()->m_MapBestTimeSeconds) * 100 + static_cast<int64_t>(GameClient()->m_MapBestTimeMillis) / 10;
-		str_time(TimeCentiseconds, ETimeFormat::HOURS_CENTISECS, aTime, sizeof(aTime));
-		str_format(aBuf, sizeof(aBuf), "%s%s", GameClient()->m_MapBestTimeSeconds > 3600 ? "" : "   ", aTime);
-		TextRender()->Text(53, 75, 6, aBuf, -1.0f);
+		if(!m_ServerRecordLabelContainerIndex.Valid())
+		{
+			CTextCursor Cursor;
+			Cursor.m_FontSize = 6.0f;
+			Cursor.m_X = 5.0f;
+			Cursor.m_Y = 75.0f;
+			TextRender()->CreateTextContainer(m_ServerRecordLabelContainerIndex, &Cursor, Localize("Server best:"));
+		}
+		if(m_ServerRecordLabelContainerIndex.Valid())
+		{
+			TextRender()->RenderTextContainer(m_ServerRecordLabelContainerIndex, TextRender()->DefaultTextColor(), TextRender()->DefaultTextOutlineColor());
+		}
+
+		const int BestSec = GameClient()->m_MapBestTimeSeconds;
+		const int BestMs = GameClient()->m_MapBestTimeMillis;
+		if(!m_ServerRecordTextContainerIndex.Valid() || BestSec != m_PrevServerBestTimeSeconds || BestMs != m_PrevServerBestTimeMillis)
+		{
+			m_PrevServerBestTimeSeconds = BestSec;
+			m_PrevServerBestTimeMillis = BestMs;
+			char aBuf[64];
+			char aTime[32];
+			int64_t TimeCentiseconds = static_cast<int64_t>(BestSec) * 100 + static_cast<int64_t>(BestMs) / 10;
+			str_time(TimeCentiseconds, ETimeFormat::HOURS_CENTISECS, aTime, sizeof(aTime));
+			str_format(aBuf, sizeof(aBuf), "%s%s", BestSec > 3600 ? "" : "   ", aTime);
+
+			CTextCursor Cursor;
+			Cursor.m_FontSize = 6.0f;
+			Cursor.m_X = 53.0f;
+			Cursor.m_Y = 75.0f;
+			if(m_ServerRecordTextContainerIndex.Valid())
+				TextRender()->RecreateTextContainer(m_ServerRecordTextContainerIndex, &Cursor, aBuf);
+			else
+				TextRender()->CreateTextContainer(m_ServerRecordTextContainerIndex, &Cursor, aBuf);
+		}
+		if(m_ServerRecordTextContainerIndex.Valid())
+		{
+			TextRender()->RenderTextContainer(m_ServerRecordTextContainerIndex, TextRender()->DefaultTextColor(), TextRender()->DefaultTextOutlineColor());
+		}
+	}
+	else
+	{
+		if(m_ServerRecordLabelContainerIndex.Valid())
+			TextRender()->DeleteTextContainer(m_ServerRecordLabelContainerIndex);
+		if(m_ServerRecordTextContainerIndex.Valid())
+		{
+			TextRender()->DeleteTextContainer(m_ServerRecordTextContainerIndex);
+			m_PrevServerBestTimeSeconds = FinishTime::UNSET;
+			m_PrevServerBestTimeMillis = FinishTime::UNSET;
+		}
 	}
 
+	bool ShowPlayerRecord = false;
 	if(GameClient()->m_ReceivedDDNetPlayerFinishTimes)
 	{
 		const int PlayerTimeSeconds = GameClient()->m_aClients[GameClient()->m_aLocalIds[g_Config.m_ClDummy]].m_FinishTimeSeconds;
 		if(PlayerTimeSeconds != FinishTime::NOT_FINISHED_MILLIS)
 		{
-			char aBuf[64];
-			TextRender()->Text(5, 82, 6, Localize("Personal best:"), -1.0f);
-			char aTime[32];
+			ShowPlayerRecord = true;
 			const int PlayerTimeMillis = GameClient()->m_aClients[GameClient()->m_aLocalIds[g_Config.m_ClDummy]].m_FinishTimeMillis;
-			int64_t TimeCentiseconds = static_cast<int64_t>(PlayerTimeSeconds) * 100 + static_cast<int64_t>(PlayerTimeMillis) / 10;
-			str_time(TimeCentiseconds, ETimeFormat::HOURS_CENTISECS, aTime, sizeof(aTime));
-			str_format(aBuf, sizeof(aBuf), "%s%s", PlayerTimeSeconds > 3600 ? "" : "   ", aTime);
-			TextRender()->Text(53, 82, 6, aBuf, -1.0f);
+			if(!m_PlayerRecordTextContainerIndex.Valid() || PlayerTimeSeconds != m_PrevPlayerFinishTimeSeconds || PlayerTimeMillis != m_PrevPlayerFinishTimeMillis)
+			{
+				m_PrevPlayerFinishTimeSeconds = PlayerTimeSeconds;
+				m_PrevPlayerFinishTimeMillis = PlayerTimeMillis;
+				char aBuf[64];
+				char aTime[32];
+				int64_t TimeCentiseconds = static_cast<int64_t>(PlayerTimeSeconds) * 100 + static_cast<int64_t>(PlayerTimeMillis) / 10;
+				str_time(TimeCentiseconds, ETimeFormat::HOURS_CENTISECS, aTime, sizeof(aTime));
+				str_format(aBuf, sizeof(aBuf), "%s%s", PlayerTimeSeconds > 3600 ? "" : "   ", aTime);
+
+				CTextCursor Cursor;
+				Cursor.m_FontSize = 6.0f;
+				Cursor.m_X = 53.0f;
+				Cursor.m_Y = 82.0f;
+				if(m_PlayerRecordTextContainerIndex.Valid())
+					TextRender()->RecreateTextContainer(m_PlayerRecordTextContainerIndex, &Cursor, aBuf);
+				else
+					TextRender()->CreateTextContainer(m_PlayerRecordTextContainerIndex, &Cursor, aBuf);
+			}
 		}
 	}
 	else
@@ -1911,12 +2319,56 @@ void CHud::RenderRecord()
 		const float PlayerRecord = m_aPlayerRecord[g_Config.m_ClDummy];
 		if(PlayerRecord > 0.0f)
 		{
-			char aBuf[64];
-			TextRender()->Text(5, 82, 6, Localize("Personal best:"), -1.0f);
-			char aTime[32];
-			str_time_float(PlayerRecord, ETimeFormat::HOURS_CENTISECS, aTime, sizeof(aTime));
-			str_format(aBuf, sizeof(aBuf), "%s%s", PlayerRecord > 3600 ? "" : "   ", aTime);
-			TextRender()->Text(53, 82, 6, aBuf, -1.0f);
+			ShowPlayerRecord = true;
+			if(!m_PlayerRecordTextContainerIndex.Valid() || PlayerRecord != m_PrevPlayerRecord)
+			{
+				m_PrevPlayerRecord = PlayerRecord;
+				char aBuf[64];
+				char aTime[32];
+				str_time_float(PlayerRecord, ETimeFormat::HOURS_CENTISECS, aTime, sizeof(aTime));
+				str_format(aBuf, sizeof(aBuf), "%s%s", PlayerRecord > 3600 ? "" : "   ", aTime);
+
+				CTextCursor Cursor;
+				Cursor.m_FontSize = 6.0f;
+				Cursor.m_X = 53.0f;
+				Cursor.m_Y = 82.0f;
+				if(m_PlayerRecordTextContainerIndex.Valid())
+					TextRender()->RecreateTextContainer(m_PlayerRecordTextContainerIndex, &Cursor, aBuf);
+				else
+					TextRender()->CreateTextContainer(m_PlayerRecordTextContainerIndex, &Cursor, aBuf);
+			}
+		}
+	}
+
+	if(ShowPlayerRecord)
+	{
+		if(!m_PlayerRecordLabelContainerIndex.Valid())
+		{
+			CTextCursor Cursor;
+			Cursor.m_FontSize = 6.0f;
+			Cursor.m_X = 5.0f;
+			Cursor.m_Y = 82.0f;
+			TextRender()->CreateTextContainer(m_PlayerRecordLabelContainerIndex, &Cursor, Localize("Personal best:"));
+		}
+		if(m_PlayerRecordLabelContainerIndex.Valid())
+		{
+			TextRender()->RenderTextContainer(m_PlayerRecordLabelContainerIndex, TextRender()->DefaultTextColor(), TextRender()->DefaultTextOutlineColor());
+		}
+		if(m_PlayerRecordTextContainerIndex.Valid())
+		{
+			TextRender()->RenderTextContainer(m_PlayerRecordTextContainerIndex, TextRender()->DefaultTextColor(), TextRender()->DefaultTextOutlineColor());
+		}
+	}
+	else
+	{
+		if(m_PlayerRecordLabelContainerIndex.Valid())
+			TextRender()->DeleteTextContainer(m_PlayerRecordLabelContainerIndex);
+		if(m_PlayerRecordTextContainerIndex.Valid())
+		{
+			TextRender()->DeleteTextContainer(m_PlayerRecordTextContainerIndex);
+			m_PrevPlayerFinishTimeSeconds = FinishTime::UNSET;
+			m_PrevPlayerFinishTimeMillis = FinishTime::UNSET;
+			m_PrevPlayerRecord = -1.0f;
 		}
 	}
 }

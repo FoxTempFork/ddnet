@@ -521,10 +521,23 @@ void CSkins::OnShutdown()
 void CSkins::OnUpdate()
 {
 	// Only update skins periodically to reduce FPS impact
+	if(m_UpdateSkipFrames > 0)
+	{
+		--m_UpdateSkipFrames;
+		return;
+	}
+
 	const std::chrono::nanoseconds StartTime = time_get_nanoseconds();
 	const std::chrono::nanoseconds MaxTime = std::chrono::milliseconds(std::clamp(round_to_int(Client()->RenderFrameTime() * 50000.0f), 25, 500));
 	if(m_ContainerUpdateTime.has_value() && StartTime - m_ContainerUpdateTime.value() < MaxTime)
 	{
+		const float FrameTime = Client()->RenderFrameTime();
+		if(FrameTime > 0.00001f)
+		{
+			const auto Remaining = MaxTime - (StartTime - m_ContainerUpdateTime.value());
+			const int FramesToSkip = (int)(std::chrono::duration<float>(Remaining).count() / FrameTime);
+			m_UpdateSkipFrames = std::clamp(FramesToSkip / 2, 0, 32);
+		}
 		return;
 	}
 	m_ContainerUpdateTime = StartTime;
